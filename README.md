@@ -1,25 +1,33 @@
 # Sable
 
-Trade on Monad from any chain, with an agent that works inside limits enforced on-chain.
+Local contracts for account-based trading and a yield-bearing order-book prototype on Monad.
+This repository is not evidence of what is currently deployed.
 
 Two pieces live here:
-- **SableAccount**: each user's trading account. The owner trades and withdraws; an optional agent can only swap, inside per-token limits. Swaps go through an aggregator (KyberSwap on Monad) and the result is checked on-chain.
-- **YieldBook** (spike): an order book whose idle balances and resting orders earn lending yield. Stays on testnet until audited.
+- **SableAccount**: the owner calls trading/withdrawal methods directly. The local v3 agent signs EIP-712 swaps and withdrawals for a submitter; signed withdrawals are restricted to the owner or approved payout wallet. Swaps use allowed routers and account-level checks.
+- **YieldBook** (spike): an order book whose quote balances and resting bids can earn ERC-4626 vault yield. Local tests use mocks; real-vault integration is a separate check.
 
 Intent and kill criteria: [docs/INTENT.md](docs/INTENT.md). Design decisions and tradeoffs: [docs/DECISIONS.md](docs/DECISIONS.md).
 
-## What the tests prove
+Start with [Local verification](docs/LOCAL-VERIFICATION.md) for current commands,
+observed results, version boundaries and unresolved risks. Historical decisions are
+not a substitute for current source or deployment verification.
+
+## What the local tests cover
+
+These are bounded regression scenarios, not an exhaustive security proof.
 
 ### SableAccount
 
 | Claim | Test |
 |---|---|
-| The agent can never withdraw | `test_onlyOwnerWithdraws` |
+| Direct withdrawals require the owner; signed agent withdrawals require an allowed recipient | `test_onlyOwnerWithdraws`, `test_agentWithdrawsOnlyToOwner`, `test_agentWithdrawsToApprovedPayoutOnly` |
 | Per-trade and daily caps hold; the day resets at UTC midnight | `test_agentPerTradeCap`, `test_agentDailyCapResetsAtUtcMidnight` |
 | No sequence of agent trades exceeds the daily cap | `testFuzz_agentNeverExceedsDaily` |
-| A bad route can't take funds: diverted or underpaid output reverts, the router can't pull more than approved, no allowance is left behind | `test_divertedOutputReverts`, `test_underpaidOutputReverts`, `test_routerCannotPullMoreThanApproved`, `test_noAllowanceLeftAfterSwap` |
-| Only listed tokens and routers; revoked agents and strangers are rejected | `test_agentCannotTradeUnlistedToken`, `test_routerNotAllowed`, `test_revokedAgentCannotTrade`, `test_strangerCannotTradeOrConfigure` |
+| Mock routes with diverted/underpaid output or excessive input revert; successful swaps clear allowance | `test_divertedOutputReverts`, `test_underpaidOutputReverts`, `test_routerCannotPullMoreThanApproved`, `test_noAllowanceLeftAfterSwap` |
+| Default listing/router checks and immediate revocation reject tested unauthorized calls; override and epoch gaps remain | `test_agentCannotTradeUnlistedToken`, `test_routerNotAllowed`, `test_revokedAgentCannotTrade`, `test_strangerCannotTradeOrConfigure` |
 | One account per owner at a predictable address; the implementation can't be initialized | `test_factoryGivesPredictableAddress`, `test_oneAccountPerOwner`, `test_implementationCannotBeInitialized` |
+| Basic signature, nonce, deadline and gas-fee rules execute on the local v3 account | `test_signedSwapRejectsWrongSignerAndChangedCalldata`, `test_signedWithdrawalNonceIsOneUse`, `test_signedWithdrawalExpiresAfterDeadline`, `test_signedSwapPaysGasFromOutputAndKeepsNetMinimum` |
 
 ### YieldBook
 
@@ -30,9 +38,9 @@ Intent and kill criteria: [docs/INTENT.md](docs/INTENT.md). Design decisions and
 | Cancel returns principal plus yield | `test_cancelReturnsPrincipalPlusYield` |
 | Fills never touch the vault, so they work with a 100% utilized market | `test_fillsNeverTouchTheVault` |
 | Withdrawals degrade cleanly when the vault is illiquid | `test_withdrawDegradesCleanlyWhenVaultIlliquid` |
-| Price-time priority, maker-price fills, far ticks | `test_priceTimePriority`, `test_takerWalksAsks...`, `test_bitmapFindsFarTicks` |
-| Accounting never breaks under random action sequences | `YieldBook.invariant.t.sol` (4 invariants) |
-| Works against a real Morpho USDC vault on Monad mainnet | `test/fork/MonadFork.t.sol` |
+| Price-time priority, maker-price fills, far ticks | `test_priceTimePriority`, `test_takerWalksAsksBestPriceFirstAtMakerPrices`, `test_bitmapFindsFarTicks` |
+| Four conservation/book invariants hold for the configured sampled sequences | `YieldBook.invariant.t.sol` (4 invariants) |
+| Optional real-vault fork scenarios exist; execution is not established by the offline suite | `test/fork/MonadFork.t.sol` |
 
 ## Layout
 
@@ -45,19 +53,27 @@ test/                  unit, fuzz, invariant, and Monad fork tests
 docs/                  intent (phase 0) and decisions
 ```
 
-## Pipeline
+## Offline checks
 
 ```bash
-forge build
-forge test                                                          # unit + fuzz + invariant
-forge test --gas-report --nmc Invariant                             # gas per function
-MONAD_RPC_URL=https://rpc.monad.xyz forge test --mc MonadFork -vv   # real Monad state
+forge test --offline --no-match-path 'test/fork/*' -vv
+forge build --offline --skip test --skip script --sizes
 forge fmt --check
 ```
 
-CI (`.github/workflows/test.yml`) runs format, build, all tests and the gas report on every push.
-Fork tests run in CI when the repository variable `MONAD_RPC_URL` is set.
+Dependencies and Solidity must already be available locally; stop rather than
+installing or connecting to RPC implicitly. See the runbook for the verified
+Windows executable path and the separate web/API commands.
+
+[CI configuration](.github/workflows/test.yml) declares format, build, tests and
+gas reporting. Its explicit RPC-gated step selects `MonadFork`, not `KyberFork`.
+No hosted CI result or fork execution is claimed by this document.
 
 ## Status
 
-Spike. Not audited. No fees, admin or upgrades yet. Open decision D8 (share-price read cost on real vaults) must be resolved before building further.
+Unaudited work in progress. Account protocol fees and factory/registry administration
+exist; the historical "no fees/admin" description applied to the earlier order-book
+spike, not the current account system. Local v3 test compatibility is restored,
+but frontend/relayer migration and release parity are not complete. The epoch and
+listing-override issues in the runbook remain open. D8 retains its historical
+measurement/decision status; it is not a measurement reproduced in this verification.

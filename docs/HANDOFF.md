@@ -1,5 +1,12 @@
 # Sable: handoff (2026-09-29)
 
+> **Verification update, 2026-09-29:** The snapshot below is preserved as history.
+> Its statements that local v3 was not compiled/tested and that the account tests
+> still need migration are superseded by [Local verification](LOCAL-VERIFICATION.md).
+> Deployment addresses, balances and live-version claims below were not reverified.
+> Historical deployment commands are not authorization to run them; remaining v3
+> integration work and current safety boundaries are listed in the new runbook.
+
 ## Qué es
 DEX tipo fomo.family en Monad: login fácil, un saldo, trades en ~1s sin popups, cross-chain, filtro anti-scam (Sable Shield), fee 0.3%.
 

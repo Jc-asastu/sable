@@ -1,5 +1,11 @@
 # Sable · Decisions
 
+> **Version note, 2026-09-29:** This is a chronological decision record, not one
+> simultaneous description of current behavior. D9/D11 agent restrictions and the
+> earlier spike exclusions are superseded in part by later decisions and local v3.
+> [Local verification](LOCAL-VERIFICATION.md) records current source behavior,
+> executable checks and known gaps without changing these historical decisions.
+
 Each decision: what, why, and the tradeoff we accept.
 
 ## D1 · Internal balances, fills never touch the lending vault
