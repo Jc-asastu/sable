@@ -1,0 +1,357 @@
+// SPDX-License-Identifier: UNLICENSED
+pragma solidity 0.8.28;
+
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {Initializable} from "@openzeppelin/contracts/proxy/utils/Initializable.sol";
+import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+import {EIP712} from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
+import {TokenRegistry} from "./TokenRegistry.sol";
+
+interface IWMON {
+    function deposit() external payable;
+    function withdraw(uint256 amount) external;
+}
+
+/// @title SableAccount
+/// @notice A user's trading account on Monad. The owner trades and withdraws freely. An optional
+/// agent (in the app, a key in the user's browser) never sends transactions: it signs orders that
+/// anyone may submit, so Sable's relayer pays the gas and is reimbursed out of the order itself.
+/// Signed orders may only swap between tokens the Sable Shield registry lists, through allowed
+/// routers, inside per-token caps, and may only withdraw to the owner or the owner's payout wallet.
+/// Policy semantics follow SAW v1.5 (DECISIONS D9, D13, D16).
+contract SableAccount is Initializable, ReentrancyGuard, EIP712 {
+    using SafeERC20 for IERC20;
+
+    /// Caps are in the token's own units: no oracle, so a cap can't be bypassed by valuing one
+    /// token in another (SAW M-1).
+    struct Limit {
+        uint128 perTrade;
+        uint128 daily;
+    }
+
+    struct Spend {
+        uint64 day; // UTC day index, block.timestamp / 1 days (SAW L-1)
+        uint192 spent;
+    }
+
+    /// A trade the agent signed. `gasFee` is paid in `tokenOut`, out of the proceeds, and `minOut`
+    /// is what the account keeps after it. The route calldata is signed by hash.
+    struct SwapOrder {
+        address router;
+        address tokenIn;
+        uint256 amountIn;
+        address tokenOut;
+        uint256 minOut;
+        uint256 gasFee;
+        uint256 nonce;
+        uint256 deadline;
+    }
+
+    /// A withdrawal the agent signed. token == address(0) means native MON (paid from WMON);
+    /// `gasFee` is paid in the same token, on top of `amount`.
+    struct WithdrawOrder {
+        address token;
+        uint256 amount;
+        address to;
+        uint256 gasFee;
+        uint256 nonce;
+        uint256 deadline;
+    }
+
+    bytes32 private constant SWAP_TYPEHASH = keccak256(
+        "SwapOrder(address router,address tokenIn,uint256 amountIn,address tokenOut,uint256 minOut,uint256 gasFee,uint256 nonce,uint256 deadline,bytes32 dataHash)"
+    );
+    bytes32 private constant WITHDRAW_TYPEHASH = keccak256(
+        "WithdrawOrder(address token,uint256 amount,address to,uint256 gasFee,uint256 nonce,uint256 deadline)"
+    );
+
+    /// A signed order's gas fee is at most this share of what it moves, so a leaked agent key
+    /// can't burn a balance through fees. Fees go to the protocol treasury, never to the submitter.
+    uint256 public constant MAX_GAS_BPS = 500;
+
+    TokenRegistry public immutable registry;
+    IWMON public immutable wmon;
+
+    address public owner;
+    address public agent;
+    /// Bumped on every agent change. The app derives the agent key from a wallet signature over
+    /// the epoch, so turning the agent off and on again always yields a fresh key.
+    uint64 public agentEpoch;
+    uint64 public cooldown;
+    uint64 public lastAgentTrade;
+    mapping(address => bool) public routerAllowed;
+    /// Owner overrides of the registry caps for this account; zero means "use the registry".
+    mapping(address => Limit) public limitOf;
+    mapping(address => Spend) public spendOf;
+    /// A second wallet the owner approved for instant withdrawals (an exchange, a cold wallet).
+    address public payout;
+    mapping(uint256 => bool) public nonceUsed;
+
+    event Swapped(
+        address indexed by, address indexed tokenIn, address indexed tokenOut, uint256 amountIn, uint256 amountOut
+    );
+    event Withdrawn(address indexed token, address indexed to, uint256 amount);
+    event FeePaid(address indexed token, address indexed to, uint256 amount);
+    event GasPaid(address indexed token, address indexed to, uint256 amount);
+    event AgentSet(address agent, uint64 epoch);
+    event LimitSet(address indexed token, uint128 perTrade, uint128 daily);
+    event RouterSet(address indexed router, bool allowed);
+    event CooldownSet(uint64 cooldown);
+    event PayoutSet(address payout);
+
+    error NotOwner();
+    error NotAuthorized();
+    error RouterNotAllowed();
+    error TokenNotAllowed();
+    error ExceedsPerTrade();
+    error ExceedsDaily();
+    error CooldownActive();
+    error ZeroMinOut();
+    error InsufficientOutput(uint256 received, uint256 minOut);
+    error OverSpent();
+    error NativeTransferFailed();
+    error Expired();
+    error NonceUsed();
+    error GasFeeTooHigh();
+
+    modifier onlyOwner() {
+        if (msg.sender != owner) revert NotOwner();
+        _;
+    }
+
+    /// EIP712's domain uses the clone's own address (OZ rebuilds it when address(this) differs
+    /// from the implementation), so an order signed for one account can't run on another.
+    constructor(TokenRegistry registry_, IWMON wmon_) EIP712("SableAccount", "3") {
+        registry = registry_;
+        wmon = wmon_;
+        _disableInitializers();
+    }
+
+    /// @dev Called once by the factory in the same transaction that deploys the clone.
+    function initialize(address owner_, address agent_, address[] calldata routers, uint64 cooldown_)
+        external
+        initializer
+    {
+        owner = owner_;
+        agent = agent_;
+        cooldown = cooldown_;
+        for (uint256 i; i < routers.length; i++) {
+            routerAllowed[routers[i]] = true;
+            emit RouterSet(routers[i], true);
+        }
+        emit AgentSet(agent_, 0);
+    }
+
+    /// @notice Native MON sent to the account is wrapped on arrival, so a deposit is a plain send.
+    receive() external payable {
+        if (msg.sender != address(wmon)) wmon.deposit{value: msg.value}();
+    }
+
+    // ───────────────────────── trading ─────────────────────────
+
+    /// @notice The owner swaps `amountIn` of `tokenIn` through an allowed router using calldata built
+    /// off-chain (e.g. by an aggregator API). The protocol fee is taken from `amountIn` first, so the
+    /// route must be built for `amountIn - fee`. `tokenOut` must arrive here, at least `minOut`, and
+    /// the router can never pull more than it was approved.
+    function swap(
+        address router,
+        address tokenIn,
+        uint256 amountIn,
+        address tokenOut,
+        uint256 minOut,
+        bytes calldata data
+    ) external onlyOwner nonReentrant returns (uint256) {
+        return _swap(SwapOrder(router, tokenIn, amountIn, tokenOut, minOut, 0, 0, 0), data);
+    }
+
+    /// @notice Runs a swap the agent signed. Anyone may submit it; the Shield listing and caps apply,
+    /// and `gasFee` (in `tokenOut`) goes to the treasury that funds the relayer.
+    function swapWithSig(SwapOrder calldata o, bytes calldata data, bytes calldata sig)
+        external
+        nonReentrant
+        returns (uint256)
+    {
+        bytes32 structHash = keccak256(
+            abi.encode(
+                SWAP_TYPEHASH,
+                o.router,
+                o.tokenIn,
+                o.amountIn,
+                o.tokenOut,
+                o.minOut,
+                o.gasFee,
+                o.nonce,
+                o.deadline,
+                keccak256(data)
+            )
+        );
+        _useAgentSig(structHash, o.nonce, o.deadline, sig);
+        _checkAgent(o.tokenIn, o.amountIn, o.tokenOut);
+        return _swap(o, data);
+    }
+
+    function _swap(SwapOrder memory o, bytes calldata data) private returns (uint256 amountOut) {
+        if (!routerAllowed[o.router]) revert RouterNotAllowed();
+        if (o.minOut == 0) revert ZeroMinOut(); // an unbounded swap lets the router keep the input
+        IERC20 tokenIn = IERC20(o.tokenIn);
+        IERC20 tokenOut = IERC20(o.tokenOut);
+
+        uint256 inBefore = tokenIn.balanceOf(address(this));
+        uint256 outBefore = tokenOut.balanceOf(address(this));
+        tokenIn.forceApprove(o.router, _takeFee(o.tokenIn, o.amountIn));
+        (bool ok, bytes memory ret) = o.router.call(data);
+        if (!ok) _bubble(ret);
+        tokenIn.forceApprove(o.router, 0); // no leftover allowance (PayClaw H-1)
+
+        if (inBefore - tokenIn.balanceOf(address(this)) > o.amountIn) revert OverSpent();
+        amountOut = tokenOut.balanceOf(address(this)) - outBefore;
+        if (amountOut < o.minOut + o.gasFee) revert InsufficientOutput(amountOut, o.minOut + o.gasFee);
+        if (o.gasFee != 0) {
+            _payGas(o.tokenOut, o.gasFee, amountOut);
+            amountOut -= o.gasFee;
+        }
+        emit Swapped(msg.sender == owner ? owner : agent, o.tokenIn, o.tokenOut, o.amountIn, amountOut);
+    }
+
+    /// @notice The agent cap for `token`: the owner's override if set, else the Shield listing.
+    function capOf(address token) public view returns (Limit memory lim) {
+        lim = limitOf[token];
+        if (lim.daily == 0) (lim.perTrade, lim.daily) = registry.listingOf(token);
+    }
+
+    /// Both sides must be allowed (the agent only ever holds Shield-listed tokens); caps apply to
+    /// what it spends. Hard caps always revert: an over-limit trade is left for the owner to sign
+    /// directly (SAW v1.5, hard caps before escalation).
+    function _checkAgent(address tokenIn, uint256 amountIn, address tokenOut) internal {
+        Limit memory lim = capOf(tokenIn);
+        if (lim.daily == 0 || capOf(tokenOut).daily == 0) revert TokenNotAllowed();
+        if (amountIn > lim.perTrade) revert ExceedsPerTrade();
+        uint256 last = lastAgentTrade; // 0 = the agent has never traded
+        if (cooldown != 0 && last != 0 && block.timestamp < last + cooldown) revert CooldownActive();
+
+        uint64 today = uint64(block.timestamp / 1 days);
+        Spend memory s = spendOf[tokenIn];
+        uint256 spent = (s.day == today ? s.spent : 0) + amountIn;
+        if (spent > lim.daily) revert ExceedsDaily();
+        spendOf[tokenIn] = Spend(today, uint192(spent));
+        lastAgentTrade = uint64(block.timestamp);
+    }
+
+    /// Pays the protocol fee out of `amountIn` and returns what is left for the route.
+    function _takeFee(address token, uint256 amountIn) private returns (uint256 net) {
+        (uint16 feeBps, address feeTo) = registry.fee();
+        uint256 fee = amountIn * feeBps / 10_000;
+        if (fee != 0) {
+            IERC20(token).safeTransfer(feeTo, fee);
+            emit FeePaid(token, feeTo, fee);
+        }
+        return amountIn - fee;
+    }
+
+    /// Reimburses the relayer's gas to the treasury, capped at MAX_GAS_BPS of `moved`.
+    function _payGas(address token, uint256 gasFee, uint256 moved) private {
+        if (gasFee * 10_000 > moved * MAX_GAS_BPS) revert GasFeeTooHigh();
+        (, address feeTo) = registry.fee();
+        IERC20(token).safeTransfer(feeTo, gasFee);
+        emit GasPaid(token, feeTo, gasFee);
+    }
+
+    /// One use per signature: unexpired, fresh nonce, signed by the current agent.
+    function _useAgentSig(bytes32 structHash, uint256 nonce, uint256 deadline, bytes calldata sig) private {
+        if (block.timestamp > deadline) revert Expired();
+        if (nonceUsed[nonce]) revert NonceUsed();
+        address a = agent;
+        if (a == address(0) || ECDSA.recover(_hashTypedDataV4(structHash), sig) != a) revert NotAuthorized();
+        nonceUsed[nonce] = true;
+    }
+
+    function _bubble(bytes memory ret) private pure {
+        assembly {
+            revert(add(ret, 32), mload(ret))
+        }
+    }
+
+    // ───────────────────────── withdrawals ─────────────────────────
+
+    function withdraw(address token, uint256 amount, address to) external onlyOwner nonReentrant {
+        IERC20(token).safeTransfer(to, amount);
+        emit Withdrawn(token, to, amount);
+    }
+
+    /// @notice Withdraw WMON as native MON.
+    function withdrawNative(uint256 amount, address payable to) external onlyOwner nonReentrant {
+        _sendNative(amount, to);
+    }
+
+    /// @notice A withdrawal the agent signed: only to the owner or the approved payout wallet, so a
+    /// leaked agent key can move funds only to places the owner chose.
+    function withdrawWithSig(WithdrawOrder calldata o, bytes calldata sig) external nonReentrant {
+        _useAgentSig(
+            keccak256(abi.encode(WITHDRAW_TYPEHASH, o.token, o.amount, o.to, o.gasFee, o.nonce, o.deadline)),
+            o.nonce,
+            o.deadline,
+            sig
+        );
+        if (o.to != owner && (o.to != payout || payout == address(0))) revert NotAuthorized();
+        bool native = o.token == address(0);
+        if (o.gasFee != 0) _payGas(native ? address(wmon) : o.token, o.gasFee, o.amount);
+        if (native) {
+            _sendNative(o.amount, payable(o.to));
+        } else {
+            IERC20(o.token).safeTransfer(o.to, o.amount);
+            emit Withdrawn(o.token, o.to, o.amount);
+        }
+    }
+
+    function _sendNative(uint256 amount, address payable to) private {
+        wmon.withdraw(amount);
+        (bool ok,) = to.call{value: amount}("");
+        if (!ok) revert NativeTransferFailed();
+        emit Withdrawn(address(0), to, amount);
+    }
+
+    // ───────────────────────── owner settings ─────────────────────────
+
+    /// @notice Approve one extra wallet for instant withdrawals. address(0) removes it.
+    function setPayout(address payout_) external onlyOwner {
+        payout = payout_;
+        emit PayoutSet(payout_);
+    }
+
+    /// @notice Replace or remove (address(0)) the agent. Every change starts a new key epoch.
+    function setAgent(address agent_) external onlyOwner {
+        agent = agent_;
+        emit AgentSet(agent_, ++agentEpoch);
+    }
+
+    /// @notice Override the Shield caps for this account (e.g. stricter ones). Zero clears it.
+    function setLimit(address token, uint128 perTrade, uint128 daily) external onlyOwner {
+        limitOf[token] = Limit(perTrade, daily);
+        emit LimitSet(token, perTrade, daily);
+    }
+
+    function setRouter(address router, bool allowed) external onlyOwner {
+        routerAllowed[router] = allowed;
+        emit RouterSet(router, allowed);
+    }
+
+    function setCooldown(uint64 cooldown_) external onlyOwner {
+        cooldown = cooldown_;
+        emit CooldownSet(cooldown_);
+    }
+
+    /// @notice What the agent can still spend of `token` today.
+    function agentAllowance(address token) external view returns (uint256) {
+        Limit memory lim = capOf(token);
+        Spend memory s = spendOf[token];
+        uint256 spent = s.day == block.timestamp / 1 days ? s.spent : 0;
+        return spent >= lim.daily ? 0 : lim.daily - spent;
+    }
+
+    /// @notice The EIP-712 domain separator orders are signed against.
+    function domainSeparator() external view returns (bytes32) {
+        return _domainSeparatorV4();
+    }
+}

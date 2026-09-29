@@ -1,0 +1,46 @@
+name: CI
+
+permissions: {}
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  check:
+    name: Foundry
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          submodules: recursive
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+
+      - name: Format
+        run: forge fmt --check
+
+      - name: Build
+        run: forge build --sizes
+
+      - name: Unit, fuzz and invariant tests
+        run: forge test -vvv
+
+      - name: Gas report
+        run: forge test --gas-report --nmc Invariant | tee gas-report.txt
+
+      - name: Monad mainnet fork tests
+        if: ${{ vars.MONAD_RPC_URL != '' }}
+        env:
+          MONAD_RPC_URL: ${{ vars.MONAD_RPC_URL }}
+        run: forge test --mc MonadFork -vv
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gas-report
+          path: gas-report.txt
