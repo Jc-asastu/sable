@@ -1,0 +1,25 @@
+# Prospective hints for authored files only; dependencies and outputs are unselected.
+root = true
+
+[/{src/*.sol,script/*.sol,test/*.sol,test/mocks/*.sol,test/helpers/*.sol,test/fork/*.sol}]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 4
+
+[/{scripts/*.mjs,.github/workflows/*.yml,foundry.toml}]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 2
+
+# Keep intentional Markdown hard-break spaces; historical Solidity backups are excluded.
+[/{README.md,docs/*.md}]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = false

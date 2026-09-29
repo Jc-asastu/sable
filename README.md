@@ -84,3 +84,13 @@ Local v3 registry caps now bound owner-configured agent overrides, including aft
 delisting or later cap reductions; see the runbook's registry-cap follow-up. This
 does not establish deployed policy. D8 retains its historical measurement/decision
 status; it is not a measurement reproduced in this verification.
+
+## Editing conventions
+
+[EditorConfig](.editorconfig) gives prospective hints for selected source paths:
+UTF-8, LF and final newline; Solidity uses four spaces, scripts/configuration two.
+Markdown retains hard-break spaces. Dependencies, compiler output and historical
+Solidity backups receive no rules. This is not a formatter, CI enforcement or Git
+renormalization; do not bulk-save/reformat unrelated files. `forge fmt --check`
+remains the existing Solidity format check, not an instruction to rewrite sources.
+`root = true` stops ancestor configuration lookup, including for unselected paths.
