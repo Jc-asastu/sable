@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity 0.8.28;
 
-import {Test, console2} from "forge-std/Test.sol";
+import {console2} from "forge-std/Test.sol";
+import {AgentOrders} from "../helpers/AgentOrders.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SableAccountFactory} from "../../src/SableAccountFactory.sol";
 import {SableAccount, IWMON} from "../../src/SableAccount.sol";
@@ -11,7 +12,7 @@ import {TokenRegistry} from "../../src/TokenRegistry.sol";
 /// account's limits active. Two steps, because the route must be built for the account address:
 ///   1. MONAD_RPC_URL=https://rpc.monad.xyz forge test --mc KyberFork -vv   (prints the account)
 ///   2. node scripts/kyber-fixture.mjs <account>   then run step 1 again
-contract KyberForkTest is Test {
+contract KyberForkTest is AgentOrders {
     address constant USDC = 0x754704Bc059F8C67012fEd69BC8A327a5aafb603;
     address constant WMON = 0x3bd359C1119dA7Da1D913D1C4D2B7c461115433A;
     address constant KYBER_ROUTER = 0x6131B5fae19EA4f9D964eAc0408E4408b66337b5;
@@ -19,7 +20,8 @@ contract KyberForkTest is Test {
 
     SableAccount account;
     address owner = makeAddr("owner");
-    address agent = makeAddr("agent");
+    uint256 agentKey = 0xA11CE; // Mock signer, used only on the local fork.
+    address agent = vm.addr(agentKey);
 
     function setUp() public {
         string memory rpc = vm.envOr("MONAD_RPC_URL", string(""));
@@ -68,8 +70,12 @@ contract KyberForkTest is Test {
         assertEq(vm.parseJsonAddress(json, ".router"), KYBER_ROUTER, "route uses the allowlisted router");
 
         deal(USDC, address(account), 10e6);
-        vm.prank(agent);
-        uint256 out = account.swap(KYBER_ROUTER, USDC, amountIn, WMON, minOut, vm.parseJsonBytes(json, ".data"));
+        bytes memory data = vm.parseJsonBytes(json, ".data");
+        SableAccount.SwapOrder memory o =
+            SableAccount.SwapOrder(KYBER_ROUTER, USDC, amountIn, WMON, minOut, 0, 0, block.timestamp + 1 hours);
+        bytes memory sig = _signSwap(address(account), agentKey, o, data);
+        vm.prank(makeAddr("relayer"));
+        uint256 out = account.swapWithSig(o, data, sig);
 
         console2.log("WMON received (units)", out);
         assertGe(out, minOut);

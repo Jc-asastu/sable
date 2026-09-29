@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity 0.8.28;
 
-import {Test} from "forge-std/Test.sol";
+import {AgentOrders} from "./helpers/AgentOrders.sol";
 import {Initializable} from "@openzeppelin/contracts/proxy/utils/Initializable.sol";
 import {SableAccount, IWMON} from "../src/SableAccount.sol";
 import {SableAccountFactory} from "../src/SableAccountFactory.sol";
@@ -9,7 +9,7 @@ import {TokenRegistry} from "../src/TokenRegistry.sol";
 import {MockToken, MockWMON} from "./mocks/Mocks.sol";
 import {MockRouter} from "./mocks/MockRouter.sol";
 
-contract SableAccountTest is Test {
+contract SableAccountTest is AgentOrders {
     MockToken usdc;
     MockWMON wmon;
     MockRouter router;
@@ -18,7 +18,10 @@ contract SableAccountTest is Test {
     SableAccount account;
 
     address owner = makeAddr("owner");
-    address agent = makeAddr("agent");
+    uint256 agentKey = 0xA11CE; // Deterministic test key, never used outside this suite.
+    address agent = vm.addr(agentKey);
+    address relayer = makeAddr("relayer");
+    uint256 nextNonce;
     address stranger = makeAddr("stranger");
 
     function setUp() public {
@@ -53,8 +56,36 @@ contract SableAccountTest is Test {
         returns (uint256)
     {
         bytes memory data = abi.encodeCall(MockRouter.swap, (tokenIn, amountIn, tokenOut, out));
+        if (by == agent) {
+            return _submitSwap(address(router), tokenIn, amountIn, tokenOut, out, 0, data);
+        }
         vm.prank(by);
         return account.swap(address(router), tokenIn, amountIn, tokenOut, out, data);
+    }
+
+    function _submitSwap(
+        address route,
+        address tokenIn,
+        uint256 amountIn,
+        address tokenOut,
+        uint256 minOut,
+        uint256 gasFee,
+        bytes memory data
+    ) internal returns (uint256) {
+        SableAccount.SwapOrder memory o = SableAccount.SwapOrder(
+            route, tokenIn, amountIn, tokenOut, minOut, gasFee, nextNonce++, block.timestamp + 1 hours
+        );
+        bytes memory sig = _signSwap(address(account), agentKey, o, data);
+        vm.prank(relayer);
+        return account.swapWithSig(o, data, sig);
+    }
+
+    function _withdraw(address token, uint256 amount, address to, uint256 gasFee) internal {
+        SableAccount.WithdrawOrder memory o =
+            SableAccount.WithdrawOrder(token, amount, to, gasFee, nextNonce++, block.timestamp + 1 hours);
+        bytes memory sig = _signWithdrawal(address(account), agentKey, o);
+        vm.prank(relayer);
+        account.withdrawWithSig(o, sig);
     }
 
     /// buy WMON with USDC at 0.03 USDC/WMON
@@ -106,10 +137,10 @@ contract SableAccountTest is Test {
 
     function test_onlyOwnerWithdraws() public {
         vm.prank(agent);
-        vm.expectRevert(SableAccount.NotAuthorized.selector);
+        vm.expectRevert(SableAccount.NotOwner.selector);
         account.withdraw(address(usdc), 1e6, agent); // the agent can't send funds to itself
         vm.prank(stranger);
-        vm.expectRevert(SableAccount.NotAuthorized.selector);
+        vm.expectRevert(SableAccount.NotOwner.selector);
         account.withdraw(address(usdc), 1e6, stranger);
 
         vm.prank(owner);
@@ -131,7 +162,7 @@ contract SableAccountTest is Test {
     function test_withdrawNative() public {
         vm.deal(address(wmon), 1 ether); // backing for the mock's pre-minted WMON
         vm.prank(agent);
-        vm.expectRevert(SableAccount.NotAuthorized.selector);
+        vm.expectRevert(SableAccount.NotOwner.selector);
         account.withdrawNative(1 ether, payable(agent));
 
         vm.prank(owner);
@@ -140,21 +171,20 @@ contract SableAccountTest is Test {
     }
 
     function test_agentWithdrawsOnlyToOwner() public {
-        vm.prank(agent);
-        account.withdraw(address(usdc), 100e6, owner);
+        vm.expectRevert(SableAccount.NotAuthorized.selector);
+        _withdraw(address(usdc), 1e6, agent, 0);
+        _withdraw(address(usdc), 100e6, owner, 0);
         assertEq(usdc.balanceOf(owner), 100e6, "the fast key can return funds to the owner");
 
         vm.deal(address(wmon), 1 ether);
-        vm.prank(agent);
-        account.withdrawNative(1 ether, payable(owner));
+        _withdraw(address(0), 1 ether, owner, 0);
         assertEq(owner.balance, 1 ether);
     }
 
     function test_agentWithdrawsToApprovedPayoutOnly() public {
         address exchange = makeAddr("exchange");
-        vm.prank(agent);
         vm.expectRevert(SableAccount.NotAuthorized.selector);
-        account.withdraw(address(usdc), 1e6, exchange); // not approved yet
+        _withdraw(address(usdc), 1e6, exchange, 0); // not approved yet
 
         vm.prank(agent);
         vm.expectRevert(SableAccount.NotOwner.selector);
@@ -162,38 +192,58 @@ contract SableAccountTest is Test {
 
         vm.prank(owner);
         account.setPayout(exchange);
-        vm.prank(agent);
-        account.withdraw(address(usdc), 50e6, exchange);
+        _withdraw(address(usdc), 50e6, exchange, 0);
         assertEq(usdc.balanceOf(exchange), 50e6, "instant withdrawal to the saved wallet");
 
         vm.prank(owner);
         account.setPayout(address(0));
-        vm.prank(agent);
         vm.expectRevert(SableAccount.NotAuthorized.selector);
-        account.withdraw(address(usdc), 1e6, exchange);
+        _withdraw(address(usdc), 1e6, exchange, 0);
     }
 
-    function test_refuelAgentCappedDaily() public {
-        vm.deal(address(wmon), 10 ether); // backing for the mock's pre-minted WMON
-        vm.warp(20 days + 1 hours);
-        vm.prank(agent);
-        account.refuelAgent(1.5 ether);
-        assertEq(agent.balance, 1.5 ether);
-
-        vm.prank(agent);
-        vm.expectRevert(SableAccount.ExceedsGasAllowance.selector);
-        account.refuelAgent(0.6 ether);
-
-        vm.warp(21 days); // next UTC day
-        vm.prank(agent);
-        account.refuelAgent(2 ether);
-
-        vm.prank(stranger);
-        vm.expectRevert(SableAccount.NotAuthorized.selector);
-        account.refuelAgent(1);
+    function test_directAgentCallsAreOwnerOnlyEvenWithSafeDestinations() public {
+        vm.startPrank(agent);
+        vm.expectRevert(SableAccount.NotOwner.selector);
+        account.swap(address(router), address(usdc), 1e6, address(wmon), 1, "");
+        vm.expectRevert(SableAccount.NotOwner.selector);
+        account.withdraw(address(usdc), 1e6, owner);
+        vm.expectRevert(SableAccount.NotOwner.selector);
+        account.withdrawNative(1 ether, payable(owner));
+        vm.stopPrank();
     }
 
-    // ── protocol fee ──
+    function test_signedWithdrawalGasGoesToTreasuryNotSubmitter() public {
+        address treasury = makeAddr("treasury");
+        registry.setFee(0, treasury);
+        _withdraw(address(usdc), 100e6, owner, 5e6); // exactly the 5% cap
+        assertEq(usdc.balanceOf(owner), 100e6);
+        assertEq(usdc.balanceOf(treasury), 5e6);
+        assertEq(usdc.balanceOf(address(account)), 895e6);
+        assertEq(usdc.balanceOf(relayer), 0);
+        assertEq(usdc.balanceOf(agent), 0);
+    }
+
+    function test_signedNativeWithdrawalPaysGasInWmon() public {
+        address treasury = makeAddr("treasury");
+        registry.setFee(0, treasury);
+        vm.deal(address(wmon), 1 ether);
+        uint256 before = wmon.balanceOf(address(account));
+        _withdraw(address(0), 1 ether, owner, 0.05 ether);
+        assertEq(owner.balance, 1 ether);
+        assertEq(wmon.balanceOf(treasury), 0.05 ether);
+        assertEq(wmon.balanceOf(address(account)), before - 1.05 ether);
+        assertEq(relayer.balance, 0);
+    }
+
+    function test_signedWithdrawalRejectsExcessGasAndRollsBackNonce() public {
+        vm.expectRevert(SableAccount.GasFeeTooHigh.selector);
+        _withdraw(address(usdc), 100e6, owner, 5e6 + 1);
+        assertFalse(account.nonceUsed(0));
+        assertEq(usdc.balanceOf(address(account)), 1_000e6);
+        assertEq(usdc.balanceOf(owner), 0);
+    }
+
+    // Protocol fee
 
     function test_feeTakenFromInputAndRouteGetsTheRest() public {
         address treasury = makeAddr("treasury");
@@ -202,8 +252,7 @@ contract SableAccountTest is Test {
         uint256 fee = amountIn * 30 / 10_000;
         // the route is built for the net amount; the router can't pull a unit more
         bytes memory data = abi.encodeCall(MockRouter.swap, (address(usdc), amountIn - fee, address(wmon), 1e18));
-        vm.prank(agent);
-        account.swap(address(router), address(usdc), amountIn, address(wmon), 1e18, data);
+        _submitSwap(address(router), address(usdc), amountIn, address(wmon), 1e18, 0, data);
         assertEq(usdc.balanceOf(treasury), fee, "fee paid to the treasury");
         assertEq(usdc.balanceOf(address(account)), 1_000e6 - amountIn, "total spent = amountIn");
         assertEq(account.agentAllowance(address(usdc)), 200e6 - amountIn, "caps count the whole amount");
@@ -217,6 +266,87 @@ contract SableAccountTest is Test {
         vm.prank(stranger);
         vm.expectRevert();
         registry.setFee(10, stranger);
+    }
+
+    function test_signedSwapPaysGasFromOutputAndKeepsNetMinimum() public {
+        address treasury = makeAddr("treasury");
+        registry.setFee(30, treasury);
+        uint256 before = wmon.balanceOf(address(account));
+        bytes memory data = abi.encodeCall(MockRouter.swap, (address(usdc), 9_970_000, address(wmon), 1 ether));
+        uint256 out = _submitSwap(address(router), address(usdc), 10e6, address(wmon), 0.95 ether, 0.05 ether, data);
+        assertEq(out, 0.95 ether);
+        assertEq(wmon.balanceOf(address(account)) - before, out);
+        assertEq(wmon.balanceOf(treasury), 0.05 ether);
+        assertEq(usdc.balanceOf(treasury), 30_000);
+        assertEq(wmon.balanceOf(relayer), 0);
+        assertEq(usdc.allowance(address(account), address(router)), 0);
+    }
+
+    function test_signedSwapRejectsExcessGasAndRollsBackTrade() public {
+        bytes memory data = abi.encodeCall(MockRouter.swap, (address(usdc), 10e6, address(wmon), 1 ether));
+        vm.expectRevert(SableAccount.GasFeeTooHigh.selector);
+        _submitSwap(address(router), address(usdc), 10e6, address(wmon), 0.9 ether, 0.05 ether + 1, data);
+        assertFalse(account.nonceUsed(0));
+        assertEq(usdc.balanceOf(address(account)), 1_000e6);
+        assertEq(account.agentAllowance(address(usdc)), 200e6);
+        assertEq(usdc.allowance(address(account), address(router)), 0);
+    }
+
+    function test_signedSwapMinimumIncludesGas() public {
+        bytes memory data = abi.encodeCall(MockRouter.swap, (address(usdc), 10e6, address(wmon), 1 ether));
+        vm.expectRevert(abi.encodeWithSelector(SableAccount.InsufficientOutput.selector, 1 ether, 1.01 ether));
+        _submitSwap(address(router), address(usdc), 10e6, address(wmon), 1 ether, 0.01 ether, data);
+        assertFalse(account.nonceUsed(0));
+    }
+
+    // Basic wire-format regressions; exhaustive adversarial lifecycle coverage is a separate unit.
+    function test_signedSwapRejectsWrongSignerAndChangedCalldata() public {
+        SableAccount.SwapOrder memory o = SableAccount.SwapOrder(
+            address(router), address(usdc), 10e6, address(wmon), 1 ether, 0, 0, block.timestamp + 1 hours
+        );
+        bytes memory data = abi.encodeCall(MockRouter.swap, (address(usdc), 10e6, address(wmon), 1 ether));
+        bytes memory sig = _signSwap(address(account), 0xBAD, o, data);
+        vm.expectRevert(SableAccount.NotAuthorized.selector);
+        account.swapWithSig(o, data, sig);
+
+        sig = _signSwap(address(account), agentKey, o, data);
+        bytes memory changedData = abi.encodeCall(MockRouter.swap, (address(usdc), 10e6, address(wmon), 2 ether));
+        vm.expectRevert(SableAccount.NotAuthorized.selector);
+        account.swapWithSig(o, changedData, sig);
+        assertFalse(account.nonceUsed(0));
+        assertEq(usdc.balanceOf(address(account)), 1_000e6);
+    }
+
+    function test_signedWithdrawalRejectsWrongAccountDomain() public {
+        SableAccount.WithdrawOrder memory o =
+            SableAccount.WithdrawOrder(address(usdc), 1e6, owner, 0, 0, block.timestamp + 1 hours);
+        bytes memory sig = _signWithdrawal(address(factory.implementation()), agentKey, o);
+        vm.expectRevert(SableAccount.NotAuthorized.selector);
+        account.withdrawWithSig(o, sig);
+        assertFalse(account.nonceUsed(0));
+    }
+
+    function test_signedWithdrawalNonceIsOneUse() public {
+        SableAccount.WithdrawOrder memory o =
+            SableAccount.WithdrawOrder(address(usdc), 1e6, owner, 0, 0, block.timestamp + 1 hours);
+        bytes memory sig = _signWithdrawal(address(account), agentKey, o);
+        vm.prank(relayer);
+        account.withdrawWithSig(o, sig);
+        assertTrue(account.nonceUsed(0));
+        vm.expectRevert(SableAccount.NonceUsed.selector);
+        account.withdrawWithSig(o, sig);
+        assertEq(usdc.balanceOf(owner), 1e6);
+    }
+
+    function test_signedWithdrawalExpiresAfterDeadline() public {
+        SableAccount.WithdrawOrder memory o =
+            SableAccount.WithdrawOrder(address(usdc), 1e6, owner, 0, 0, block.timestamp + 1 hours);
+        bytes memory sig = _signWithdrawal(address(account), agentKey, o);
+        vm.warp(o.deadline + 1);
+        vm.expectRevert(SableAccount.Expired.selector);
+        account.withdrawWithSig(o, sig);
+        assertFalse(account.nonceUsed(0));
+        assertEq(usdc.balanceOf(owner), 0);
     }
 
     // ── one-transaction onboarding ──
@@ -337,7 +467,7 @@ contract SableAccountTest is Test {
     }
 
     function test_strangerCannotTradeOrConfigure() public {
-        vm.expectRevert(SableAccount.NotAuthorized.selector);
+        vm.expectRevert(SableAccount.NotOwner.selector);
         _buy(stranger, 10e6);
         vm.prank(stranger);
         vm.expectRevert(SableAccount.NotOwner.selector);
@@ -348,9 +478,8 @@ contract SableAccountTest is Test {
 
     function test_routerNotAllowed() public {
         MockRouter other = new MockRouter();
-        vm.prank(agent);
         vm.expectRevert(SableAccount.RouterNotAllowed.selector);
-        account.swap(address(other), address(usdc), 10e6, address(wmon), 1, "");
+        _submitSwap(address(other), address(usdc), 10e6, address(wmon), 1, 0, "");
     }
 
     function test_divertedOutputReverts() public {
@@ -378,9 +507,8 @@ contract SableAccountTest is Test {
     }
 
     function test_zeroMinOutReverts() public {
-        vm.prank(agent);
         vm.expectRevert(SableAccount.ZeroMinOut.selector);
-        account.swap(address(router), address(usdc), 10e6, address(wmon), 0, "");
+        _submitSwap(address(router), address(usdc), 10e6, address(wmon), 0, 0, "");
     }
 
     // ── fuzz: whatever the agent tries, one day never exceeds the daily cap ──
