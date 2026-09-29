@@ -1,7 +1,8 @@
 # Verify the current local system without deploying
 
-Evidence snapshot: **2026-09-29**, contract source baseline `a704462`, web/API
-baseline `6e1de09`. Documentation changes do not alter either implementation.
+Original evidence snapshot: **2026-09-29**, contract source baseline `a704462`, web/API
+baseline `6e1de09`. The epoch-binding follow-up below supersedes only its account
+signature schema and contract test count; original web evidence remains dated.
 This runbook separates observed local checks from configured CI and unverified
 production behavior. It is not a deployment guide or security certification.
 
@@ -66,11 +67,32 @@ Read [README](../README.md) for test names. The historical
 [handoff](HANDOFF.md) and [decisions](DECISIONS.md) retain their original context;
 they must not be treated as fresh production evidence or new execution authority.
 
+## Local epoch-binding follow-up (2026-09-29)
+
+Both `SwapOrder` and `WithdrawOrder` append a signed `uint64 epoch` after
+`deadline` (before `dataHash` in the swap typed-data definition). It must equal
+`agentEpoch`. Every `setAgent` call invalidates earlier epochs, including setting
+the same key directly or removing and reinstalling it. `nonceUsed` stays global
+across epochs and both operations; failed execution rolls nonce consumption back.
+
+The EIP-712 domain remains `SableAccount`, version `3`, current chain and clone
+address. The changed tuple ABI/typehashes intentionally invalidate earlier local
+v3 encodings/signatures, even at epoch zero. Clients must read the current epoch
+before signing and use the new schema; no compatibility fallback is provided.
+This is an unreleased local correction, not a deployed-clone upgrade or a
+frontend/relayer/artifact migration. The independent test helper constructs its
+own type hashes and domain rather than calling a production digest helper.
+
+After this change, the targeted `SableAccountTest` command passed **53/53** and
+the full offline nonfork command above passed **73/73**, with no skips/failures.
+The new lifecycle/domain/field/deadline/rollback fuzz tests each ran 1,000 cases;
+the four existing invariants retained 128 runs of depth 64. Source build/sizes
+and format checks passed; existing lint warnings described above remain.
+`forge build --offline test/fork/KyberFork.t.sol` compiled the updated tuple/helper
+usage only: the fork scenario and route fixture were not executed or refreshed.
+
 ## Known gaps are not waived by green tests
 
-- **Agent epochs:** `setAgent` increments `agentEpoch`, but the signed structures
-  and `_useAgentSig` do not bind it. Reinstalling the same key can revive unused,
-  unexpired old signatures. Immediate revocation tests do not cover that lifecycle.
 - **Listing overrides:** `capOf` can return a local nonzero override without reading
   registry listing status. Default delisting tests do not prove override-safe delisting.
 - **Release integration:** relayer/frontend v3 migration, real-router behavior,

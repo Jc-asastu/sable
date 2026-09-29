@@ -73,7 +73,7 @@ contract SableAccountTest is AgentOrders {
         bytes memory data
     ) internal returns (uint256) {
         SableAccount.SwapOrder memory o = SableAccount.SwapOrder(
-            route, tokenIn, amountIn, tokenOut, minOut, gasFee, nextNonce++, block.timestamp + 1 hours
+            route, tokenIn, amountIn, tokenOut, minOut, gasFee, nextNonce++, block.timestamp + 1 hours, 0
         );
         bytes memory sig = _signSwap(address(account), agentKey, o, data);
         vm.prank(relayer);
@@ -82,7 +82,7 @@ contract SableAccountTest is AgentOrders {
 
     function _withdraw(address token, uint256 amount, address to, uint256 gasFee) internal {
         SableAccount.WithdrawOrder memory o =
-            SableAccount.WithdrawOrder(token, amount, to, gasFee, nextNonce++, block.timestamp + 1 hours);
+            SableAccount.WithdrawOrder(token, amount, to, gasFee, nextNonce++, block.timestamp + 1 hours, 0);
         bytes memory sig = _signWithdrawal(address(account), agentKey, o);
         vm.prank(relayer);
         account.withdrawWithSig(o, sig);
@@ -300,9 +300,236 @@ contract SableAccountTest is AgentOrders {
     }
 
     // Basic wire-format regressions; exhaustive adversarial lifecycle coverage is a separate unit.
+    function test_epochSwapReinstatement() public {
+        testFuzz_epochRotationInvalidatesPendingOrders(false, 0);
+    }
+
+    function test_epochWithdrawalReinstatement() public {
+        testFuzz_epochRotationInvalidatesPendingOrders(true, 0);
+    }
+
+    function testFuzz_epochRotationInvalidatesPendingOrders(bool withdrawal, uint8 mode) public {
+        SableAccount.SwapOrder memory s = SableAccount.SwapOrder(
+            address(router), address(usdc), 10e6, address(wmon), 1 ether, 0, 0, block.timestamp + 1 hours, 0
+        );
+        SableAccount.WithdrawOrder memory w =
+            SableAccount.WithdrawOrder(address(usdc), 1e6, owner, 0, 0, block.timestamp + 1 hours, 0);
+        bytes memory data = abi.encodeCall(MockRouter.swap, (address(usdc), 10e6, address(wmon), 1 ether));
+        bytes memory sig = withdrawal
+            ? _signWithdrawal(address(account), agentKey, w)
+            : _signSwap(address(account), agentKey, s, data);
+        bytes memory action = withdrawal
+            ? abi.encodeCall(account.withdrawWithSig, (w, sig))
+            : abi.encodeCall(account.swapWithSig, (s, data, sig));
+        vm.startPrank(owner);
+        if (mode % 3 == 0) account.setAgent(address(0));
+        if (mode % 3 == 1) account.setAgent(stranger);
+        account.setAgent(agent); // Includes direct same-key reset, not just remove/reinstall.
+        vm.stopPrank();
+        (bool ok,) = address(account).call(action);
+        assertFalse(ok, "an earlier epoch must not revive when the same key returns");
+        assertFalse(account.nonceUsed(0));
+        bytes memory fresh =
+            _epochAction(withdrawal, account.agentEpoch(), 0, block.timestamp + 1 hours, address(account));
+        (ok,) = address(account).call(fresh);
+        assertTrue(ok, "a fresh signature for the new epoch works");
+    }
+
+    function _epochAction(bool withdrawal, uint64 epoch, uint256 nonce, uint256 deadline, address domain)
+        internal
+        view
+        returns (bytes memory)
+    {
+        if (withdrawal) {
+            SableAccount.WithdrawOrder memory w =
+                SableAccount.WithdrawOrder(address(usdc), 1e6, owner, 0, nonce, deadline, epoch);
+            return abi.encodeCall(account.withdrawWithSig, (w, _signWithdrawal(domain, agentKey, w)));
+        }
+        SableAccount.SwapOrder memory s = SableAccount.SwapOrder(
+            address(router), address(usdc), 10e6, address(wmon), 1 ether, 0, nonce, deadline, epoch
+        );
+        bytes memory data = abi.encodeCall(MockRouter.swap, (address(usdc), 10e6, address(wmon), 1 ether));
+        return abi.encodeCall(account.swapWithSig, (s, data, _signSwap(domain, agentKey, s, data)));
+    }
+
+    function _rejectAction(bytes memory action, bytes4 selector) internal {
+        vm.prank(relayer);
+        (bool ok, bytes memory error) = address(account).call(action);
+        assertFalse(ok);
+        assertEq(bytes4(error), selector);
+    }
+
+    function testFuzz_epochRejectsFutureAndDisabledOrDifferentAgent(bool withdrawal) public {
+        uint256 deadline = block.timestamp + 1 hours;
+        bytes memory pending = _epochAction(withdrawal, 0, 0, deadline, address(account));
+        vm.prank(owner);
+        account.setAgent(address(0));
+        _rejectAction(pending, SableAccount.NotAuthorized.selector);
+        vm.prank(owner);
+        account.setAgent(stranger);
+        _rejectAction(_epochAction(withdrawal, 2, 0, deadline, address(account)), SableAccount.NotAuthorized.selector);
+        assertFalse(account.nonceUsed(0));
+        assertEq(usdc.balanceOf(address(account)), 1_000e6);
+        agentKey = 0xB0B;
+        vm.prank(owner);
+        account.setAgent(vm.addr(agentKey));
+        _rejectAction(_epochAction(withdrawal, 4, 0, deadline, address(account)), SableAccount.NotAuthorized.selector);
+        (bool ok,) = address(account).call(_epochAction(withdrawal, 3, 0, deadline, address(account)));
+        assertTrue(ok, "new key and current epoch can execute");
+    }
+
+    function testFuzz_epochNonceIsGlobalAcrossOperationsAndRotations(bool withdrawal) public {
+        bytes memory action = _epochAction(withdrawal, 0, 9, block.timestamp + 1 hours, address(account));
+        (bool ok,) = address(account).call(action);
+        assertTrue(ok);
+        _rejectAction(action, SableAccount.NonceUsed.selector);
+        vm.prank(owner);
+        account.setAgent(agent);
+        _rejectAction(
+            _epochAction(!withdrawal, 1, 9, block.timestamp + 1 hours, address(account)),
+            SableAccount.NonceUsed.selector
+        );
+        assertTrue(account.nonceUsed(9));
+        (ok,) = address(account).call(_epochAction(!withdrawal, 1, 10, block.timestamp + 1 hours, address(account)));
+        assertTrue(ok);
+    }
+
+    function testFuzz_epochDomainSeparation(bool withdrawal, uint8 mode) public {
+        uint256 chain = block.chainid;
+        if (mode % 3 == 0) vm.chainId(chain + 1);
+        if (mode % 3 == 1) orderDomainVersion = "2";
+        address domain = mode % 3 == 2 ? address(factory.implementation()) : address(account);
+        bytes memory action = _epochAction(withdrawal, 0, 0, block.timestamp + 1 hours, domain);
+        vm.chainId(chain);
+        orderDomainVersion = "3";
+        _rejectAction(action, SableAccount.NotAuthorized.selector);
+        assertFalse(account.nonceUsed(0));
+    }
+
+    function testFuzz_epochDeadlineBoundary(bool withdrawal) public {
+        uint256 deadline = block.timestamp + 1 hours;
+        bytes memory valid = _epochAction(withdrawal, 0, 0, deadline, address(account));
+        bytes memory expired = _epochAction(withdrawal, 0, 1, deadline, address(account));
+        vm.warp(deadline);
+        (bool ok,) = address(account).call(valid);
+        assertTrue(ok, "deadline is inclusive");
+        vm.warp(deadline + 1);
+        _rejectAction(expired, SableAccount.Expired.selector);
+        assertFalse(account.nonceUsed(1));
+    }
+
+    function testFuzz_epochEveryOrderFieldIsSigned(bool withdrawal, uint8 field) public {
+        bytes memory action;
+        if (withdrawal) {
+            SableAccount.WithdrawOrder memory w =
+                SableAccount.WithdrawOrder(address(usdc), 1e6, owner, 0, 0, block.timestamp + 1 hours, 0);
+            bytes memory sig = _signWithdrawal(address(account), agentKey, w);
+            uint256 f = field % 7;
+            if (f == 0) w.token = address(wmon);
+            if (f == 1) w.amount++;
+            if (f == 2) w.to = stranger;
+            if (f == 3) w.gasFee++;
+            if (f == 4) w.nonce++;
+            if (f == 5) w.deadline++;
+            if (f == 6) {
+                vm.prank(owner);
+                account.setAgent(agent);
+                w.epoch++; // Now matches storage: rejection must come from the signed hash.
+            }
+            action = abi.encodeCall(account.withdrawWithSig, (w, sig));
+        } else {
+            SableAccount.SwapOrder memory s = SableAccount.SwapOrder(
+                address(router), address(usdc), 10e6, address(wmon), 1 ether, 0, 0, block.timestamp + 1 hours, 0
+            );
+            bytes memory data = abi.encodeCall(MockRouter.swap, (address(usdc), 10e6, address(wmon), 1 ether));
+            bytes memory sig = _signSwap(address(account), agentKey, s, data);
+            uint256 f = field % 10;
+            if (f == 0) s.router = stranger;
+            if (f == 1) s.tokenIn = address(wmon);
+            if (f == 2) s.amountIn++;
+            if (f == 3) s.tokenOut = address(usdc);
+            if (f == 4) s.minOut++;
+            if (f == 5) s.gasFee++;
+            if (f == 6) s.nonce++;
+            if (f == 7) s.deadline++;
+            if (f == 8) {
+                vm.prank(owner);
+                account.setAgent(agent);
+                s.epoch++;
+            }
+            if (f == 9) data = hex"12345678";
+            action = abi.encodeCall(account.swapWithSig, (s, data, sig));
+        }
+        _rejectAction(action, SableAccount.NotAuthorized.selector);
+        assertFalse(account.nonceUsed(0));
+        assertFalse(account.nonceUsed(1));
+        assertEq(usdc.balanceOf(address(account)), 1_000e6);
+    }
+
+    function testFuzz_epochFailedExecutionDoesNotConsumeNonce(bool withdrawal) public {
+        bytes memory action = _epochAction(withdrawal, 0, 0, block.timestamp + 1 hours, address(account));
+        if (withdrawal) {
+            vm.prank(owner);
+            account.withdraw(address(usdc), 1_000e6, owner);
+        } else {
+            vm.prank(owner);
+            account.setRouter(address(router), false);
+        }
+        (bool ok,) = address(account).call(action);
+        assertFalse(ok);
+        assertFalse(account.nonceUsed(0));
+        assertEq(account.agentAllowance(address(usdc)), 200e6);
+        if (withdrawal) {
+            usdc.mint(address(account), 1_000e6);
+        } else {
+            vm.prank(owner);
+            account.setRouter(address(router), true);
+        }
+        (ok,) = address(account).call(action);
+        assertTrue(ok, "same signature remains usable after reverted execution");
+    }
+
+    function testFuzz_epochRejectsLegacySchemaEvenAtEpochZero(bool withdrawal) public {
+        uint256 deadline = block.timestamp + 1 hours;
+        bytes memory action;
+        if (withdrawal) {
+            bytes32 legacy = keccak256(
+                "WithdrawOrder(address token,uint256 amount,address to,uint256 gasFee,uint256 nonce,uint256 deadline)"
+            );
+            bytes32 hash = keccak256(abi.encode(legacy, address(usdc), 1e6, owner, 0, 0, deadline));
+            SableAccount.WithdrawOrder memory w =
+                SableAccount.WithdrawOrder(address(usdc), 1e6, owner, 0, 0, deadline, 0);
+            action = abi.encodeCall(account.withdrawWithSig, (w, _signOrder(address(account), agentKey, hash)));
+        } else {
+            bytes memory data = abi.encodeCall(MockRouter.swap, (address(usdc), 10e6, address(wmon), 1 ether));
+            bytes32 legacy = keccak256(
+                "SwapOrder(address router,address tokenIn,uint256 amountIn,address tokenOut,uint256 minOut,uint256 gasFee,uint256 nonce,uint256 deadline,bytes32 dataHash)"
+            );
+            bytes32 hash = keccak256(
+                abi.encode(
+                    legacy,
+                    address(router),
+                    address(usdc),
+                    10e6,
+                    address(wmon),
+                    1 ether,
+                    0,
+                    0,
+                    deadline,
+                    keccak256(data)
+                )
+            );
+            SableAccount.SwapOrder memory s =
+                SableAccount.SwapOrder(address(router), address(usdc), 10e6, address(wmon), 1 ether, 0, 0, deadline, 0);
+            action = abi.encodeCall(account.swapWithSig, (s, data, _signOrder(address(account), agentKey, hash)));
+        }
+        _rejectAction(action, SableAccount.NotAuthorized.selector);
+        assertFalse(account.nonceUsed(0));
+    }
+
     function test_signedSwapRejectsWrongSignerAndChangedCalldata() public {
         SableAccount.SwapOrder memory o = SableAccount.SwapOrder(
-            address(router), address(usdc), 10e6, address(wmon), 1 ether, 0, 0, block.timestamp + 1 hours
+            address(router), address(usdc), 10e6, address(wmon), 1 ether, 0, 0, block.timestamp + 1 hours, 0
         );
         bytes memory data = abi.encodeCall(MockRouter.swap, (address(usdc), 10e6, address(wmon), 1 ether));
         bytes memory sig = _signSwap(address(account), 0xBAD, o, data);
@@ -319,7 +546,7 @@ contract SableAccountTest is AgentOrders {
 
     function test_signedWithdrawalRejectsWrongAccountDomain() public {
         SableAccount.WithdrawOrder memory o =
-            SableAccount.WithdrawOrder(address(usdc), 1e6, owner, 0, 0, block.timestamp + 1 hours);
+            SableAccount.WithdrawOrder(address(usdc), 1e6, owner, 0, 0, block.timestamp + 1 hours, 0);
         bytes memory sig = _signWithdrawal(address(factory.implementation()), agentKey, o);
         vm.expectRevert(SableAccount.NotAuthorized.selector);
         account.withdrawWithSig(o, sig);
@@ -328,7 +555,7 @@ contract SableAccountTest is AgentOrders {
 
     function test_signedWithdrawalNonceIsOneUse() public {
         SableAccount.WithdrawOrder memory o =
-            SableAccount.WithdrawOrder(address(usdc), 1e6, owner, 0, 0, block.timestamp + 1 hours);
+            SableAccount.WithdrawOrder(address(usdc), 1e6, owner, 0, 0, block.timestamp + 1 hours, 0);
         bytes memory sig = _signWithdrawal(address(account), agentKey, o);
         vm.prank(relayer);
         account.withdrawWithSig(o, sig);
@@ -340,7 +567,7 @@ contract SableAccountTest is AgentOrders {
 
     function test_signedWithdrawalExpiresAfterDeadline() public {
         SableAccount.WithdrawOrder memory o =
-            SableAccount.WithdrawOrder(address(usdc), 1e6, owner, 0, 0, block.timestamp + 1 hours);
+            SableAccount.WithdrawOrder(address(usdc), 1e6, owner, 0, 0, block.timestamp + 1 hours, 0);
         bytes memory sig = _signWithdrawal(address(account), agentKey, o);
         vm.warp(o.deadline + 1);
         vm.expectRevert(SableAccount.Expired.selector);

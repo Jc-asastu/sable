@@ -37,7 +37,7 @@ contract SableAccount is Initializable, ReentrancyGuard, EIP712 {
     }
 
     /// A trade the agent signed. `gasFee` is paid in `tokenOut`, out of the proceeds, and `minOut`
-    /// is what the account keeps after it. The route calldata is signed by hash.
+    /// is what the account keeps after it. The route calldata is signed by hash; epoch binds the authorization period.
     struct SwapOrder {
         address router;
         address tokenIn;
@@ -47,10 +47,11 @@ contract SableAccount is Initializable, ReentrancyGuard, EIP712 {
         uint256 gasFee;
         uint256 nonce;
         uint256 deadline;
+        uint64 epoch;
     }
 
     /// A withdrawal the agent signed. token == address(0) means native MON (paid from WMON);
-    /// `gasFee` is paid in the same token, on top of `amount`.
+    /// `gasFee` is paid in the same token, on top of `amount`. Epoch must match the current agent authorization.
     struct WithdrawOrder {
         address token;
         uint256 amount;
@@ -58,13 +59,14 @@ contract SableAccount is Initializable, ReentrancyGuard, EIP712 {
         uint256 gasFee;
         uint256 nonce;
         uint256 deadline;
+        uint64 epoch;
     }
 
     bytes32 private constant SWAP_TYPEHASH = keccak256(
-        "SwapOrder(address router,address tokenIn,uint256 amountIn,address tokenOut,uint256 minOut,uint256 gasFee,uint256 nonce,uint256 deadline,bytes32 dataHash)"
+        "SwapOrder(address router,address tokenIn,uint256 amountIn,address tokenOut,uint256 minOut,uint256 gasFee,uint256 nonce,uint256 deadline,uint64 epoch,bytes32 dataHash)"
     );
     bytes32 private constant WITHDRAW_TYPEHASH = keccak256(
-        "WithdrawOrder(address token,uint256 amount,address to,uint256 gasFee,uint256 nonce,uint256 deadline)"
+        "WithdrawOrder(address token,uint256 amount,address to,uint256 gasFee,uint256 nonce,uint256 deadline,uint64 epoch)"
     );
 
     /// A signed order's gas fee is at most this share of what it moves, so a leaked agent key
@@ -77,7 +79,7 @@ contract SableAccount is Initializable, ReentrancyGuard, EIP712 {
     address public owner;
     address public agent;
     /// Bumped on every agent change. The app derives the agent key from a wallet signature over
-    /// the epoch, so turning the agent off and on again always yields a fresh key.
+    /// the epoch. Signed orders bind it even when an owner reinstalls the same key.
     uint64 public agentEpoch;
     uint64 public cooldown;
     uint64 public lastAgentTrade;
@@ -163,7 +165,7 @@ contract SableAccount is Initializable, ReentrancyGuard, EIP712 {
         uint256 minOut,
         bytes calldata data
     ) external onlyOwner nonReentrant returns (uint256) {
-        return _swap(SwapOrder(router, tokenIn, amountIn, tokenOut, minOut, 0, 0, 0), data);
+        return _swap(SwapOrder(router, tokenIn, amountIn, tokenOut, minOut, 0, 0, 0, 0), data);
     }
 
     /// @notice Runs a swap the agent signed. Anyone may submit it; the Shield listing and caps apply,
@@ -184,10 +186,11 @@ contract SableAccount is Initializable, ReentrancyGuard, EIP712 {
                 o.gasFee,
                 o.nonce,
                 o.deadline,
+                o.epoch,
                 keccak256(data)
             )
         );
-        _useAgentSig(structHash, o.nonce, o.deadline, sig);
+        _useAgentSig(structHash, o.nonce, o.deadline, o.epoch, sig);
         _checkAgent(o.tokenIn, o.amountIn, o.tokenOut);
         return _swap(o, data);
     }
@@ -258,12 +261,16 @@ contract SableAccount is Initializable, ReentrancyGuard, EIP712 {
         emit GasPaid(token, feeTo, gasFee);
     }
 
-    /// One use per signature: unexpired, fresh nonce, signed by the current agent.
-    function _useAgentSig(bytes32 structHash, uint256 nonce, uint256 deadline, bytes calldata sig) private {
+    /// One use per signature: unexpired, globally fresh nonce, current agent and epoch.
+    function _useAgentSig(bytes32 structHash, uint256 nonce, uint256 deadline, uint64 epoch, bytes calldata sig)
+        private
+    {
         if (block.timestamp > deadline) revert Expired();
         if (nonceUsed[nonce]) revert NonceUsed();
         address a = agent;
-        if (a == address(0) || ECDSA.recover(_hashTypedDataV4(structHash), sig) != a) revert NotAuthorized();
+        if (epoch != agentEpoch || a == address(0) || ECDSA.recover(_hashTypedDataV4(structHash), sig) != a) {
+            revert NotAuthorized();
+        }
         nonceUsed[nonce] = true;
     }
 
@@ -289,9 +296,10 @@ contract SableAccount is Initializable, ReentrancyGuard, EIP712 {
     /// leaked agent key can move funds only to places the owner chose.
     function withdrawWithSig(WithdrawOrder calldata o, bytes calldata sig) external nonReentrant {
         _useAgentSig(
-            keccak256(abi.encode(WITHDRAW_TYPEHASH, o.token, o.amount, o.to, o.gasFee, o.nonce, o.deadline)),
+            keccak256(abi.encode(WITHDRAW_TYPEHASH, o.token, o.amount, o.to, o.gasFee, o.nonce, o.deadline, o.epoch)),
             o.nonce,
             o.deadline,
+            o.epoch,
             sig
         );
         if (o.to != owner && (o.to != payout || payout == address(0))) revert NotAuthorized();

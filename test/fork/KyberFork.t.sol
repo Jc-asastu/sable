@@ -72,7 +72,7 @@ contract KyberForkTest is AgentOrders {
         deal(USDC, address(account), 10e6);
         bytes memory data = vm.parseJsonBytes(json, ".data");
         SableAccount.SwapOrder memory o =
-            SableAccount.SwapOrder(KYBER_ROUTER, USDC, amountIn, WMON, minOut, 0, 0, block.timestamp + 1 hours);
+            SableAccount.SwapOrder(KYBER_ROUTER, USDC, amountIn, WMON, minOut, 0, 0, block.timestamp + 1 hours, 0);
         bytes memory sig = _signSwap(address(account), agentKey, o, data);
         vm.prank(makeAddr("relayer"));
         uint256 out = account.swapWithSig(o, data, sig);

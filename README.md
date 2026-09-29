@@ -25,7 +25,9 @@ These are bounded regression scenarios, not an exhaustive security proof.
 | Per-trade and daily caps hold; the day resets at UTC midnight | `test_agentPerTradeCap`, `test_agentDailyCapResetsAtUtcMidnight` |
 | No sequence of agent trades exceeds the daily cap | `testFuzz_agentNeverExceedsDaily` |
 | Mock routes with diverted/underpaid output or excessive input revert; successful swaps clear allowance | `test_divertedOutputReverts`, `test_underpaidOutputReverts`, `test_routerCannotPullMoreThanApproved`, `test_noAllowanceLeftAfterSwap` |
-| Default listing/router checks and immediate revocation reject tested unauthorized calls; override and epoch gaps remain | `test_agentCannotTradeUnlistedToken`, `test_routerNotAllowed`, `test_revokedAgentCannotTrade`, `test_strangerCannotTradeOrConfigure` |
+| Default listing/router checks reject tested unauthorized calls; the listing-override gap remains | `test_agentCannotTradeUnlistedToken`, `test_routerNotAllowed`, `test_strangerCannotTradeOrConfigure` |
+| Both signed paths bind the current epoch; same-key reinstatement cannot revive an earlier order, and nonces remain global | `test_epochSwapReinstatement`, `test_epochWithdrawalReinstatement`, `testFuzz_epochRotationInvalidatesPendingOrders`, `testFuzz_epochNonceIsGlobalAcrossOperationsAndRotations` |
+| Epoch, every order field, domain and deadline are checked; reverted execution preserves the nonce | `testFuzz_epochEveryOrderFieldIsSigned`, `testFuzz_epochDomainSeparation`, `testFuzz_epochDeadlineBoundary`, `testFuzz_epochFailedExecutionDoesNotConsumeNonce`, `testFuzz_epochRejectsLegacySchemaEvenAtEpochZero` |
 | One account per owner at a predictable address; the implementation can't be initialized | `test_factoryGivesPredictableAddress`, `test_oneAccountPerOwner`, `test_implementationCannotBeInitialized` |
 | Basic signature, nonce, deadline and gas-fee rules execute on the local v3 account | `test_signedSwapRejectsWrongSignerAndChangedCalldata`, `test_signedWithdrawalNonceIsOneUse`, `test_signedWithdrawalExpiresAfterDeadline`, `test_signedSwapPaysGasFromOutputAndKeepsNetMinimum` |
 
@@ -74,6 +76,8 @@ No hosted CI result or fork execution is claimed by this document.
 Unaudited work in progress. Account protocol fees and factory/registry administration
 exist; the historical "no fees/admin" description applied to the earlier order-book
 spike, not the current account system. Local v3 test compatibility is restored,
-but frontend/relayer migration and release parity are not complete. The epoch and
-listing-override issues in the runbook remain open. D8 retains its historical
+but frontend/relayer migration and release parity are not complete. Signed tuples
+now include `uint64 epoch`; this breaks earlier local v3 ABI/signatures while the
+EIP-712 domain version remains `3`. No deployed account is changed by this repair.
+The listing-override issue in the runbook remains open. D8 retains its historical
 measurement/decision status; it is not a measurement reproduced in this verification.

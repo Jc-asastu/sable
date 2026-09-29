@@ -6,11 +6,12 @@ import {SableAccount} from "../../src/SableAccount.sol";
 
 /// @dev Independent client-side encoding for the v3 wire format. Keys are mock test fixtures only.
 abstract contract AgentOrders is Test {
+    string internal orderDomainVersion = "3";
     bytes32 private constant SWAP_TYPEHASH = keccak256(
-        "SwapOrder(address router,address tokenIn,uint256 amountIn,address tokenOut,uint256 minOut,uint256 gasFee,uint256 nonce,uint256 deadline,bytes32 dataHash)"
+        "SwapOrder(address router,address tokenIn,uint256 amountIn,address tokenOut,uint256 minOut,uint256 gasFee,uint256 nonce,uint256 deadline,uint64 epoch,bytes32 dataHash)"
     );
     bytes32 private constant WITHDRAW_TYPEHASH = keccak256(
-        "WithdrawOrder(address token,uint256 amount,address to,uint256 gasFee,uint256 nonce,uint256 deadline)"
+        "WithdrawOrder(address token,uint256 amount,address to,uint256 gasFee,uint256 nonce,uint256 deadline,uint64 epoch)"
     );
 
     function _signSwap(address account, uint256 key, SableAccount.SwapOrder memory o, bytes memory data)
@@ -29,6 +30,7 @@ abstract contract AgentOrders is Test {
                 o.gasFee,
                 o.nonce,
                 o.deadline,
+                o.epoch,
                 keccak256(data)
             )
         );
@@ -43,16 +45,16 @@ abstract contract AgentOrders is Test {
         return _signOrder(
             account,
             key,
-            keccak256(abi.encode(WITHDRAW_TYPEHASH, o.token, o.amount, o.to, o.gasFee, o.nonce, o.deadline))
+            keccak256(abi.encode(WITHDRAW_TYPEHASH, o.token, o.amount, o.to, o.gasFee, o.nonce, o.deadline, o.epoch))
         );
     }
 
-    function _signOrder(address account, uint256 key, bytes32 structHash) private view returns (bytes memory) {
+    function _signOrder(address account, uint256 key, bytes32 structHash) internal view returns (bytes memory) {
         bytes32 domain = keccak256(
             abi.encode(
                 keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"),
                 keccak256("SableAccount"),
-                keccak256("3"),
+                keccak256(bytes(orderDomainVersion)),
                 block.chainid,
                 account
             )
