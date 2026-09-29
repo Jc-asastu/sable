@@ -113,10 +113,32 @@ bitmap storage reads, vault-view cost or deployed throughput. Historical fork ga
 measurements were not reproduced. No order price, refund policy, vault valuation
 formula, account signature schema or deployment was changed in this follow-up.
 
+## Local registry-cap precedence follow-up (2026-09-29)
+
+`capOf` now reads the current registry listing on every call. Unlisted or
+delisted tokens return zero caps, even with a stored local override. A local
+`daily == 0` still inherits the whole listing; otherwise each effective cap is
+the minimum of its local and registry values. Later registry reductions take
+effect without reconfiguring the account. Existing daily spend is retained;
+remaining allowance saturates at zero if a reduction falls below that spend.
+
+Eight `registryCaps` regressions in `SableAccountTest` cover both token sides,
+unlisted/delisted overrides, component-wise minima, oversized daily/per-trade
+limits, clearing, later reductions, UTC rollover and rejected-call nonce rollback.
+Owner direct swaps/withdrawals remain available after delisting; router approval
+and owner-only configuration are still required. Signed withdrawal recipients,
+epochs and global nonces are unchanged. No storage or signature ABI changed.
+
+The targeted account suite passed **61/61** and full offline nonfork verification
+passed **90/90**, without failures or skips. The new cap fuzz test ran 1,000 cases;
+the four existing invariants retained 128 runs of depth 64. Source build/sizes,
+fork compile-only, formatting and diff checks passed; existing lint warnings remain.
+
+This corrects local v3 policy only: it neither upgrades deployed clones nor
+verifies live registry state, v2 backups, frontend/relayer integration or artifacts.
+
 ## Known gaps are not waived by green tests
 
-- **Listing overrides:** `capOf` can return a local nonzero override without reading
-  registry listing status. Default delisting tests do not prove override-safe delisting.
 - **Release integration:** relayer/frontend v3 migration, real-router behavior,
   deployed-source parity and external security review remain unverified/incomplete.
 - **Web evidence:** mocked wallet/transport tests are not browser accessibility,

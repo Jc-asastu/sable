@@ -218,10 +218,15 @@ contract SableAccount is Initializable, ReentrancyGuard, EIP712 {
         emit Swapped(msg.sender == owner ? owner : agent, o.tokenIn, o.tokenOut, o.amountIn, amountOut);
     }
 
-    /// @notice The agent cap for `token`: the owner's override if set, else the Shield listing.
+    /// @notice Current Shield caps, optionally tightened per component by the owner's local limits.
+    /// Delisted tokens have zero caps; a local daily limit of zero inherits the whole listing.
     function capOf(address token) public view returns (Limit memory lim) {
-        lim = limitOf[token];
-        if (lim.daily == 0) (lim.perTrade, lim.daily) = registry.listingOf(token);
+        (lim.perTrade, lim.daily) = registry.listingOf(token);
+        Limit memory local = limitOf[token];
+        if (local.daily != 0) {
+            if (local.perTrade < lim.perTrade) lim.perTrade = local.perTrade;
+            if (local.daily < lim.daily) lim.daily = local.daily;
+        }
     }
 
     /// Both sides must be allowed (the agent only ever holds Shield-listed tokens); caps apply to
@@ -334,7 +339,7 @@ contract SableAccount is Initializable, ReentrancyGuard, EIP712 {
         emit AgentSet(agent_, ++agentEpoch);
     }
 
-    /// @notice Override the Shield caps for this account (e.g. stricter ones). Zero clears it.
+    /// @notice Tighten current Shield caps for this account. A zero daily limit clears the override.
     function setLimit(address token, uint128 perTrade, uint128 daily) external onlyOwner {
         limitOf[token] = Limit(perTrade, daily);
         emit LimitSet(token, perTrade, daily);

@@ -637,6 +637,158 @@ contract SableAccountTest is AgentOrders {
         assertEq(account.agentAllowance(address(usdc)), 10e6);
     }
 
+    function _registryCap(address token, uint128 perTrade, uint128 daily) internal {
+        address[] memory tokens = new address[](1);
+        tokens[0] = token;
+        TokenRegistry.Listing[] memory caps = new TokenRegistry.Listing[](1);
+        caps[0] = TokenRegistry.Listing(perTrade, daily);
+        if (daily == 0) registry.delist(tokens);
+        else registry.list(tokens, caps);
+    }
+
+    function _assertCap(address token, uint128 perTrade, uint128 daily) internal view {
+        SableAccount.Limit memory cap = account.capOf(token);
+        assertEq(cap.perTrade, perTrade);
+        assertEq(cap.daily, daily);
+    }
+
+    function _expectCapSwap(address tokenIn, uint256 amount, address tokenOut, bytes4 reason) internal {
+        bytes memory data = abi.encodeCall(MockRouter.swap, (tokenIn, amount, tokenOut, 1));
+        SableAccount.SwapOrder memory order = SableAccount.SwapOrder(
+            address(router), tokenIn, amount, tokenOut, 1, 0, nextNonce++, block.timestamp + 1 hours, 0
+        );
+        bytes memory sig = _signSwap(address(account), agentKey, order, data);
+        vm.prank(relayer);
+        vm.expectRevert(reason);
+        account.swapWithSig(order, data, sig);
+        assertFalse(account.nonceUsed(order.nonce), "rejected policy preserves the nonce");
+    }
+
+    function test_registryCapsOverrideCannotListOrReviveEitherSide() public {
+        for (uint256 i; i < 4; ++i) {
+            MockToken token = new MockToken("OTHER", 6);
+            token.mint(address(account), 10e6);
+            bool input = i % 2 == 0;
+            if (i >= 2) _registryCap(address(token), 50e6, 200e6);
+            vm.prank(owner);
+            account.setLimit(address(token), 50e6, 200e6);
+            if (i >= 2) _registryCap(address(token), 0, 0);
+            _assertCap(address(token), 0, 0);
+            assertEq(account.agentAllowance(address(token)), 0);
+            _expectCapSwap(
+                input ? address(token) : address(usdc),
+                1e6,
+                input ? address(wmon) : address(token),
+                SableAccount.TokenNotAllowed.selector
+            );
+            assertEq(token.balanceOf(address(account)), 10e6);
+        }
+    }
+
+    function testFuzz_registryCapsComponentWiseMinimum(uint128 perTrade, uint128 daily) public {
+        vm.prank(owner);
+        account.setLimit(address(usdc), perTrade, daily);
+        _assertCap(
+            address(usdc), daily == 0 || perTrade > 50e6 ? 50e6 : perTrade, daily == 0 || daily > 200e6 ? 200e6 : daily
+        );
+    }
+
+    function test_registryCapsOversizedAndMixedOverridesEnforceBothLimits() public {
+        vm.prank(owner);
+        account.setLimit(address(usdc), 100e6, 500e6);
+        _expectCapSwap(address(usdc), 50e6 + 1, address(wmon), SableAccount.ExceedsPerTrade.selector);
+        vm.prank(owner);
+        account.setLimit(address(usdc), 100e6, 20e6);
+        _assertCap(address(usdc), 50e6, 20e6);
+        _buy(agent, 20e6);
+        _expectCapSwap(address(usdc), 1, address(wmon), SableAccount.ExceedsDaily.selector);
+        vm.prank(owner);
+        account.setLimit(address(usdc), 10e6, 500e6);
+        _assertCap(address(usdc), 10e6, 200e6);
+        _expectCapSwap(address(usdc), 10e6 + 1, address(wmon), SableAccount.ExceedsPerTrade.selector);
+        assertEq(account.agentAllowance(address(usdc)), 180e6, "override changes do not reset spend");
+    }
+
+    function test_registryCapsOversizedDailyCannotIncreaseSpending() public {
+        vm.prank(owner);
+        account.setLimit(address(usdc), 100e6, 500e6);
+        for (uint256 i; i < 4; ++i) {
+            _buy(agent, 50e6);
+        }
+        assertEq(account.agentAllowance(address(usdc)), 0);
+        _expectCapSwap(address(usdc), 1, address(wmon), SableAccount.ExceedsDaily.selector);
+    }
+
+    function test_registryCapsReductionUsesExistingDailySpend() public {
+        vm.warp(10 days + 1);
+        vm.prank(owner);
+        account.setLimit(address(usdc), 100e6, 500e6);
+        _buy(agent, 40e6);
+        _registryCap(address(usdc), 10e6, 50e6);
+        _assertCap(address(usdc), 10e6, 50e6);
+        assertEq(account.agentAllowance(address(usdc)), 10e6);
+        _expectCapSwap(address(usdc), 10e6 + 1, address(wmon), SableAccount.ExceedsPerTrade.selector);
+        _registryCap(address(usdc), 10e6, 30e6);
+        assertEq(account.agentAllowance(address(usdc)), 0, "reduction below spend saturates allowance");
+        _expectCapSwap(address(usdc), 1, address(wmon), SableAccount.ExceedsDaily.selector);
+        (, uint192 spent) = account.spendOf(address(usdc));
+        assertEq(spent, 40e6);
+        vm.warp(11 days);
+        assertEq(account.agentAllowance(address(usdc)), 30e6);
+        _buy(agent, 10e6);
+        assertEq(account.agentAllowance(address(usdc)), 20e6);
+    }
+
+    function test_registryCapsClearInheritsWholeListingAndZeroPerTradeRestricts() public {
+        vm.prank(owner);
+        account.setLimit(address(usdc), 0, 20e6);
+        _assertCap(address(usdc), 0, 20e6);
+        _expectCapSwap(address(usdc), 1, address(wmon), SableAccount.ExceedsPerTrade.selector);
+        vm.prank(owner);
+        account.setLimit(address(usdc), 1, 0);
+        _assertCap(address(usdc), 50e6, 200e6);
+        _buy(agent, 50e6);
+        assertEq(account.agentAllowance(address(usdc)), 150e6);
+        _registryCap(address(usdc), 0, 0);
+        _assertCap(address(usdc), 0, 0);
+        assertEq(account.agentAllowance(address(usdc)), 0);
+    }
+
+    function test_registryCapsDelistingKeepsOwnerExitAndRouterChecks() public {
+        vm.startPrank(owner);
+        account.setLimit(address(usdc), 100e6, 500e6);
+        account.setLimit(address(wmon), 100e18, 500e18);
+        vm.stopPrank();
+        _registryCap(address(usdc), 0, 0);
+        _registryCap(address(wmon), 0, 0);
+        _expectCapSwap(address(usdc), 1e6, address(wmon), SableAccount.TokenNotAllowed.selector);
+        assertGt(_buy(owner, 60e6), 0, "owner direct swap bypasses agent policy");
+        vm.prank(owner);
+        account.withdraw(address(usdc), 100e6, owner);
+        assertEq(usdc.balanceOf(owner), 100e6);
+        vm.prank(owner);
+        account.setRouter(address(router), false);
+        vm.expectRevert(SableAccount.RouterNotAllowed.selector);
+        _buy(owner, 1e6);
+        _registryCap(address(usdc), 50e6, 200e6);
+        _registryCap(address(wmon), 100e18, 500e18);
+        _expectCapSwap(address(usdc), 1e6, address(wmon), SableAccount.RouterNotAllowed.selector);
+    }
+
+    function test_registryCapsOnlyOwnerCanChangeLocalPolicy() public {
+        address[2] memory callers = [agent, stranger];
+        for (uint256 i; i < callers.length; ++i) {
+            vm.prank(callers[i]);
+            vm.expectRevert(SableAccount.NotOwner.selector);
+            account.setLimit(address(usdc), 1, 1);
+            vm.prank(callers[i]);
+            vm.expectRevert(SableAccount.NotOwner.selector);
+            account.setRouter(address(router), false);
+        }
+        _assertCap(address(usdc), 50e6, 200e6);
+        assertGt(_buy(agent, 10e6), 0);
+    }
+
     function test_onlyCuratorLists() public {
         address[] memory t = new address[](1);
         t[0] = stranger;
