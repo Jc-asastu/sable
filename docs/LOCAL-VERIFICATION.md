@@ -2,11 +2,33 @@
 
 Original evidence snapshot: **2026-09-29**, contract source baseline `a704462`, web/API
 baseline `6e1de09`. The local follow-ups below supersede their respective contract
-behavior and test counts; original web evidence remains dated.
+and web behavior and test counts; the original snapshots remain dated.
 This runbook separates observed local checks from configured CI and unverified
 production behavior. It is not a deployment guide or security certification.
 
-## Quick path
+## Read the latest evidence first
+
+The following results were observed during earlier local verification on
+**2026-09-29**, not rerun for this documentation correction. Counts belong to the
+listed revisions; they are not promises about subsequent checkouts.
+
+| Surface / revision | Observed evidence | Scope |
+|---|---|---|
+| Contracts `ccb8233` | 90 nonfork tests, including 61 account tests | Registry-cap precedence, epoch signatures and bounded book inspection; mocks, not deployed clones |
+| Web `7ad5a17` | 313 source tests and 10 isolated browser tests | Native keyboard/focus and desktop/narrow control bounds; localized modal sizing repair |
+| Web `d3094c9` | 331 source tests and 10 isolated browser tests | Actual caller integration of bounded Relay transport |
+| Web `43ebd96` | 336 source tests and 10 isolated browser tests | Cross-chain preview invalidation and context-bound publication |
+
+Use the source-suite command below for the web checkout. Browser tests are a
+separate selection: `node --test tests/browser/*.test.cjs`, with already-installed
+runtime paths configured as described in the [browser guide](../../monad-spotdex/tests/browser/README.md).
+No browser dependency download is part of that check. The original command blocks
+and counts below remain evidence of their earlier snapshots.
+
+For behavior details, jump to [registry-cap precedence](#local-registry-cap-precedence-follow-up-2026-09-29),
+[web follow-ups](#local-web-follow-ups-2026-09-29), or [remaining gaps](#known-gaps-are-not-waived-by-green-tests).
+
+## Original verification commands and snapshot
 
 Use the two existing local repositories and already-installed tools. The commands
 below were run in the foreground with Node **24.18.0** and Forge **1.7.1**.
@@ -137,17 +159,43 @@ fork compile-only, formatting and diff checks passed; existing lint warnings rem
 This corrects local v3 policy only: it neither upgrades deployed clones nor
 verifies live registry state, v2 backups, frontend/relayer integration or artifacts.
 
+## Local web follow-ups (2026-09-29)
+
+The maintained browser harness loads actual source bytes in fresh, isolated
+contexts. Risk acknowledgment, wallet selection, Buy/Sell keyboard activation and
+deposit open/close have bounded native-browser proof. The fixture wallet never
+signs or sends; deposit submission is not exercised. Unexpected transport is
+blocked. These checks use SDK doubles and fallback fonts, not production services.
+
+API upstream JSON bodies now have a 1 MiB received-byte ceiling in
+[`api/_http.js`](../../monad-spotdex/api/_http.js), within their existing 8-second
+shared dependency budget. This is not a general incoming-request or process-memory cap.
+See [API lifetime notes](../../monad-spotdex/docs/api-lifetimes.md) for the precise boundary.
+
+[`relay-http.js`](../../monad-spotdex/relay-http.js) bounds quote/individual status
+requests to 8 seconds, destination tracking to 60 seconds total, and response
+bodies to 1 MiB. A source-confirmed tracking timeout remains destination pending;
+it does not cancel the deposit or authorize replay. Preview edits immediately
+invalidate old output; input, chain, wallet, recipient and output-node guards
+suppress stale results/errors. Obsolete requests are aborted by the 250 ms
+context monitor. These are provisional local ceilings, not measured provider SLAs.
+See [cross-chain behavior](../../monad-spotdex/docs/cross-buy.md) and its focused tests.
+
 ## Known gaps are not waived by green tests
 
 - **Release integration:** relayer/frontend v3 migration, real-router behavior,
   deployed-source parity and external security review remain unverified/incomplete.
-- **Web evidence:** mocked wallet/transport tests are not browser accessibility,
-  mobile, provider or real-fund tests. Known-token inventory is not an indexer of
-  every unknown inbound asset or other device's history.
+- **Web evidence:** the native-browser scenarios above do not certify every dialog,
+  assistive technology, real mobile device, provider or real-fund workflow. They
+  load raw source, not packaged/deployed pages. Known-token inventory is not an
+  indexer of every unknown inbound asset or other device's history.
 - **API capacity:** deadlines, three Shield workers and bounded local quota memory
   are not distributed quotas, trusted-proxy proof, client-disconnect cancellation,
-  payload limits or measured production capacity. See the web repository's
-  [API lifetime notes](../../monad-spotdex/docs/api-lifetimes.md).
+  general request-payload limits or measured production capacity. The received-byte
+  ceiling above covers consumed upstream responses only.
+- **Cross-chain lifecycle:** source receipt-watcher cleanup, stronger Relay
+  calldata/recipient validation and cross-tab/device coordination remain separate
+  work. Preview cancellation does not cancel an accepted purchase.
 
 ## Packaging and provenance
 

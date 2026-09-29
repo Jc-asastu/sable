@@ -80,5 +80,7 @@ spike, not the current account system. Local v3 test compatibility is restored,
 but frontend/relayer migration and release parity are not complete. Signed tuples
 now include `uint64 epoch`; this breaks earlier local v3 ABI/signatures while the
 EIP-712 domain version remains `3`. No deployed account is changed by this repair.
-The listing-override issue in the runbook remains open. D8 retains its historical
-measurement/decision status; it is not a measurement reproduced in this verification.
+Local v3 registry caps now bound owner-configured agent overrides, including after
+delisting or later cap reductions; see the runbook's registry-cap follow-up. This
+does not establish deployed policy. D8 retains its historical measurement/decision
+status; it is not a measurement reproduced in this verification.
