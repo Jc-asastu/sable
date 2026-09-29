@@ -26,6 +26,7 @@ contract YieldBook is ReentrancyGuard {
     uint256 public immutable bufferBps; // share of pool assets kept as cash
 
     uint256 public constant MAX_FILLS = 64;
+    uint256 public constant MAX_INSPECTIONS = 64;
     uint256 private constant VIRTUAL_SHARES = 1e6;
     uint256 private constant VIRTUAL_ASSETS = 1;
 
@@ -216,7 +217,7 @@ contract YieldBook is ReentrancyGuard {
         bool crossedLeft;
         (filled, crossedLeft) = isBid ? _buy(tick, size, ta, ts) : _sell(tick, size, ta, ts);
         uint128 remaining = size - filled;
-        // If the fill cap stopped us while the book still crosses, resting would cross it.
+        // If either work cap stopped us while the book still crosses, do not rest the remainder.
         if (remaining == 0 || ioc || crossedLeft) return (0, filled);
 
         id = nextOrderId++;
@@ -258,13 +259,16 @@ contract YieldBook is ReentrancyGuard {
         returns (uint128 filled, bool crossedLeft)
     {
         uint256 fills;
+        uint256 inspected;
         while (filled < size) {
             uint24 t = bestAskTick;
             if (t == 0 || t > limit) return (filled, false);
-            if (fills == MAX_FILLS) return (filled, true);
+            if (fills == MAX_FILLS || inspected == MAX_INSPECTIONS) return (filled, true);
             Level storage L = askLevels[t];
             uint256 p = price(t);
-            while (filled < size && L.live > 0 && fills < MAX_FILLS) {
+            while (filled < size && L.live > 0 && fills < MAX_FILLS && inspected < MAX_INSPECTIONS) {
+                // Tombstones and unaffordable bids consume work even without a fill.
+                inspected++;
                 uint256 oid = L.ids[L.head];
                 Order storage o = orders[oid];
                 if (o.size == 0) {
@@ -294,13 +298,16 @@ contract YieldBook is ReentrancyGuard {
         returns (uint128 filled, bool crossedLeft)
     {
         uint256 fills;
+        uint256 inspected;
         while (filled < size) {
             uint24 t = bestBidTick;
             if (t == 0 || t < limit) return (filled, false);
-            if (fills == MAX_FILLS) return (filled, true);
+            if (fills == MAX_FILLS || inspected == MAX_INSPECTIONS) return (filled, true);
             Level storage L = bidLevels[t];
             uint256 p = price(t);
-            while (filled < size && L.live > 0 && fills < MAX_FILLS) {
+            while (filled < size && L.live > 0 && fills < MAX_FILLS && inspected < MAX_INSPECTIONS) {
+                // Tombstones and unaffordable bids consume work even without a fill.
+                inspected++;
                 uint256 oid = L.ids[L.head];
                 Order storage o = orders[oid];
                 if (o.size == 0) {

@@ -1,8 +1,8 @@
 # Verify the current local system without deploying
 
 Original evidence snapshot: **2026-09-29**, contract source baseline `a704462`, web/API
-baseline `6e1de09`. The epoch-binding follow-up below supersedes only its account
-signature schema and contract test count; original web evidence remains dated.
+baseline `6e1de09`. The local follow-ups below supersede their respective contract
+behavior and test counts; original web evidence remains dated.
 This runbook separates observed local checks from configured CI and unverified
 production behavior. It is not a deployment guide or security certification.
 
@@ -90,6 +90,28 @@ the four existing invariants retained 128 runs of depth 64. Source build/sizes
 and format checks passed; existing lint warnings described above remain.
 `forge build --offline test/fork/KyberFork.t.sol` compiled the updated tuple/helper
 usage only: the fork scenario and route fixture were not executed or refreshed.
+
+## Local YieldBook inspection-budget follow-up (2026-09-29)
+
+Each `placeOrder` call now inspects at most 64 order heads across all matched
+price levels, alongside the existing 64-fill ceiling. Cancelled entries and
+underfunded bid closures consume that budget too. Successful calls retain cleanup/fills;
+a later call can resume. Budget exhaustion may therefore return zero fills even
+when deeper liquidity exists. A remainder never rests while crossing liquidity
+remains, but may rest when the last crossing head was cleared at the boundary.
+
+Nine regressions in `test/YieldBookInspection.t.sol` check both directions,
+cancelled prefixes, actual mock-vault asset loss, exact refunds, mixed/multi-level
+work, maker prices/FIFO, fresh share valuation on the next call, conservation and
+boundary rest behavior. The focused `YieldBook.*` suite passed **28/28**; full
+offline nonfork verification passed **82/82**, without failures or skips. The four
+existing invariants retained 128 runs of depth 64. Source build/sizes, fork
+compile-only, formatting and diff checks passed; existing lint warnings remain.
+
+This bounds inspected heads in the local spike, not total transaction gas,
+bitmap storage reads, vault-view cost or deployed throughput. Historical fork gas
+measurements were not reproduced. No order price, refund policy, vault valuation
+formula, account signature schema or deployment was changed in this follow-up.
 
 ## Known gaps are not waived by green tests
 

@@ -41,6 +41,7 @@ These are bounded regression scenarios, not an exhaustive security proof.
 | Fills never touch the vault, so they work with a 100% utilized market | `test_fillsNeverTouchTheVault` |
 | Withdrawals degrade cleanly when the vault is illiquid | `test_withdrawDegradesCleanlyWhenVaultIlliquid` |
 | Price-time priority, maker-price fills, far ticks | `test_priceTimePriority`, `test_takerWalksAsksBestPriceFirstAtMakerPrices`, `test_bitmapFindsFarTicks` |
+| At most 64 heads are inspected per match call, including cancelled/underfunded entries; partial progress never rests a crossing remainder | `YieldBookInspectionTest` (9 regressions: both directions, exact boundaries, refunds, FIFO and repeated progress) |
 | Four conservation/book invariants hold for the configured sampled sequences | `YieldBook.invariant.t.sol` (4 invariants) |
 | Optional real-vault fork scenarios exist; execution is not established by the offline suite | `test/fork/MonadFork.t.sol` |
 
