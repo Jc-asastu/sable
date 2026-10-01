@@ -1,0 +1,14 @@
+{
+  "name": "sable-keeper",
+  "private": true,
+  "type": "module",
+  "description": "Fills Sable limit orders, relays agent-signed orders and keeps points (DECISIONS D17, D18).",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "node --test \"test/*.test.js\""
+  },
+  "dependencies": {
+    "viem": "2.21.0"
+  }
+}

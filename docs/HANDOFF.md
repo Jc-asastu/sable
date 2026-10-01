@@ -49,3 +49,18 @@ Yield en saldo ocioso (vault ERC-4626), órdenes límite que rinden, Shield por 
 
 ## Reglas de Juan
 Español; ponytail (código mínimo y prolijo); nada de secretos en disco; no commit/push sin pedido; sin Co-Authored-By; el sistema bloquea crear keys y `forge script` a mainnet (deploy vía deploy.html con MetaMask).
+
+## Estado 2026-10-01 (noche) — listo para desplegar v3
+
+Hecho y probado (local, sin deploy):
+- Contrato v3 con órdenes límite que rinden yield (D17): `src/SableAccount.sol`, `src/TokenRegistry.sol`; MON enviado antes de crear la cuenta se envuelve al crearla. Tests: 109/109 + fork con los vaults reales (Aave y Euler).
+- Puntos (D18): fórmula en `keeper/src/points.js`.
+- Keeper/relayer: `keeper/` (11 tests; probado en modo observador contra Monad real). README con pasos de Railway.
+- App migrada a v3 (`monad-spotdex`): la fast key firma (EIP-712) y el keeper envía; sin gas de sesión ni recargas. Órdenes límite (`orders.js`, `terminal.js`), lista de vaults (`api/vaults.js`), tarjeta de órdenes sobre el gráfico, wallet en una tarjeta. Tests web: 346/346, incluido `tests/v3-signing.test.cjs` (tipos EIP-712 de la app = contrato).
+- `deploy.html` v3: deploy + setup (listados, fee, 2 vaults, depósito de Relay, abrir) + registrar keeper. `factory-artifact.json` v3 con procedencia (commit + sha256 de fuentes).
+
+Para salir a producción, en orden:
+1. Commitear sable + monad-spotdex (la procedencia del artefacto apunta a archivos sin commitear).
+2. Juan despliega la factory v3 desde deploy.html (2 firmas: deploy y setup) y pasa la dirección + bloque.
+3. Juan crea la wallet del keeper, la fondea (~20 MON), la registra (paso 4 de deploy.html) y crea el servicio en Railway (`keeper/README.md`).
+4. Poner `CONFIG.factory` y `CONFIG.keeper` en `monad-spotdex/app.js`, build, preview, prueba real chica (orden de $5), producción.

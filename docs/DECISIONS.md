@@ -94,3 +94,19 @@ A `TokenRegistry`, deployed by the factory and curated by the admin, lists the t
 
 ## D15 · Instant withdrawals to approved wallets
 The owner can approve one extra wallet (`setPayout`, one signature, e.g. an exchange deposit address). The fast key may withdraw to the owner or to that wallet, so withdrawals are one tap and settle in about a second, like a custodial app. The key can't approve a destination itself; removing the payout (`setPayout(0)`) revokes it at once. Same model as exchange withdrawal allowlists.
+
+## D17 · Limit orders that earn yield while they wait
+An order's funds leave the account balance into an ERC-4626 vault the user picks from an admin allowlist (Aave v3 static aUSDC or Euler Earn Clearstar USDC at launch) and earn there until a keeper fills it or the owner cancels. Yield above the order amount stays in the account. Design and evidence: `docs/specs/2026-10-01-limit-orders-yield-design.md`.
+- **Monad fills are price-protected on-chain:** `minOut` is the limit price and the contract enforces it, so a keeper only chooses when. Fills are keeper-only so nobody can route through their own pool, hand over exactly the limit and keep the surplus.
+- **Cross-chain fills (SOL on Solana) trust the keeper, bounded:** the contract pays Relay's depository itself (exact approval, reset), but can't see delivery on the other chain, so the keeper must quote the order's recipient and minimum. Agent-signed cross-chain orders can only pay a recipient the owner approved per chain.
+- **Why the user picks the vault:** APR and risk differ (Aave ~4.1%, battle-tested; Euler Earn ~6.8%, curated strategy). Only base APY is shown; incentive rewards aren't earned by the vault.
+- **Tradeoffs:** a fully utilised lending market can delay fills and cancels; keeper downtime delays fills (funds keep earning and can be cancelled); SableAccount is now 22.0 KB of the 24.6 KB limit.
+
+## D18 · Points reward filled orders, boosted by money kept waiting in orders
+Decided by Juan (2026-10-01).
+- **Base:** every filled order earns `filled USD × 10` points. Orders that never fill earn no points (only their vault yield): points reward using Sable.
+- **Multiplier:** `1 + 0.73 × log10(1 + D / 1000)`, capped at 3x, where D is the USD × days the user kept in open orders over the trailing 7 days (the filled order's own waiting time included). Example: $1,000 open for 2 days → D = 2,000 → 1.35x, so filling a $1,000 order then earns 13,500 points. $1,000 for 7 days → 1.66x; $5,000 for 7 days → 2.14x; $50,000 for 7 days → 2.86x. Log scale: more always helps, with diminishing returns, so size alone can't run away.
+- **Order price doesn't matter** for the multiplier: any open order counts, however far from the market. An order stops counting when it fills, is cancelled or its funds leave the vault.
+- **Wash trading is not blocked:** each round trip pays the 0.30% fee plus slippage (about $0.003 per point), which goes to the protocol.
+- **How, first:** computed off-chain by the keeper from the account events it already reads (`OrderPlaced`, `OrderFilled`, `OrderCancelled`). No contract change. Token, on-chain staking and an order NFT come later; a transferable NFT needs a custody redesign because each user's orders live in their own account.
+- **Considered and rejected:** distance-to-market weighting (unneeded for the goal); points for deposits alone (option B: a small base per USD-day).

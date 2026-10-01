@@ -21,9 +21,20 @@ contract TokenRegistry is Ownable2Step {
     /// Hard ceiling on the fee: not even the owner can set more than 1%.
     uint16 public constant MAX_FEE_BPS = 100;
 
+    /// ERC-4626 vaults a limit order's funds may earn in while they wait (DECISIONS D17).
+    mapping(address => bool) public vaultAllowed;
+    /// Keepers fill limit orders. A local fill can't beat the order's limit price, so a keeper only
+    /// decides when; a cross-chain fill also trusts it with the Relay request (see D17).
+    mapping(address => bool) public isKeeper;
+    /// Relay's depository on this chain: where cross-chain fills pay the solver.
+    address public relayDepository;
+
     event Listed(address indexed token, uint128 perTrade, uint128 daily);
     event Delisted(address indexed token);
     event FeeSet(uint16 feeBps, address feeRecipient);
+    event VaultSet(address indexed vault, bool allowed);
+    event KeeperSet(address indexed keeper, bool allowed);
+    event RelayDepositorySet(address depository);
 
     error LengthMismatch();
     error ZeroCap();
@@ -54,6 +65,21 @@ contract TokenRegistry is Ownable2Step {
         if (feeBps_ > MAX_FEE_BPS || (feeBps_ != 0 && feeRecipient_ == address(0))) revert FeeTooHigh();
         (feeBps, feeRecipient) = (feeBps_, feeRecipient_);
         emit FeeSet(feeBps_, feeRecipient_);
+    }
+
+    function setVault(address vault, bool allowed) external onlyOwner {
+        vaultAllowed[vault] = allowed;
+        emit VaultSet(vault, allowed);
+    }
+
+    function setKeeper(address keeper, bool allowed) external onlyOwner {
+        isKeeper[keeper] = allowed;
+        emit KeeperSet(keeper, allowed);
+    }
+
+    function setRelayDepository(address depository) external onlyOwner {
+        relayDepository = depository;
+        emit RelayDepositorySet(depository);
     }
 
     /// @notice Fee and recipient in one read, for accounts and the app.

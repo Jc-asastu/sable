@@ -7,11 +7,17 @@ import {Initializable} from "@openzeppelin/contracts/proxy/utils/Initializable.s
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import {EIP712} from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
+import {IERC4626} from "@openzeppelin/contracts/interfaces/IERC4626.sol";
 import {TokenRegistry} from "./TokenRegistry.sol";
 
 interface IWMON {
     function deposit() external payable;
     function withdraw(uint256 amount) external;
+}
+
+/// Relay's depository: a solver pays out on the destination chain once this deposit lands.
+interface IRelayDepository {
+    function depositErc20(address depositor, address token, uint256 amount, bytes32 id) external;
 }
 
 /// @title SableAccount
@@ -62,6 +68,34 @@ contract SableAccount is Initializable, ReentrancyGuard, EIP712 {
         uint64 epoch;
     }
 
+    /// A limit order: spend `amountIn` of `tokenIn` when the price is right, earning in `vault` until
+    /// then (DECISIONS D17). Local orders receive `tokenOut` on Monad and `minOut` is the limit price.
+    /// Cross-chain orders (destChainId != 0) pay a Relay solver who delivers `destToken` to
+    /// `recipient` on the destination chain; `destMinOut` is the least the keeper's quote must give.
+    struct OrderParams {
+        address tokenIn;
+        address vault;
+        address tokenOut;
+        uint64 deadline;
+        uint32 destChainId;
+        uint128 amountIn;
+        uint128 minOut;
+        uint128 destMinOut;
+        bytes32 recipient;
+        bytes32 destToken;
+    }
+
+    struct LimitOrder {
+        OrderParams p;
+        uint256 shares; // vault shares holding this order's funds
+    }
+
+    bytes32 private constant PLACE_TYPEHASH = keccak256(
+        "PlaceOrder(address tokenIn,address vault,address tokenOut,uint64 deadline,uint32 destChainId,uint128 amountIn,uint128 minOut,uint128 destMinOut,bytes32 recipient,bytes32 destToken,uint256 nonce,uint256 sigDeadline,uint64 epoch)"
+    );
+    bytes32 private constant CANCEL_TYPEHASH =
+        keccak256("CancelOrder(uint256 id,uint256 nonce,uint256 deadline,uint64 epoch)");
+
     bytes32 private constant SWAP_TYPEHASH = keccak256(
         "SwapOrder(address router,address tokenIn,uint256 amountIn,address tokenOut,uint256 minOut,uint256 gasFee,uint256 nonce,uint256 deadline,uint64 epoch,bytes32 dataHash)"
     );
@@ -90,6 +124,11 @@ contract SableAccount is Initializable, ReentrancyGuard, EIP712 {
     /// A second wallet the owner approved for instant withdrawals (an exchange, a cold wallet).
     address public payout;
     mapping(uint256 => bool) public nonceUsed;
+    mapping(uint256 => LimitOrder) internal _orders;
+    uint256 public orderCount;
+    /// Per destination chain, where the agent may send cross-chain orders (e.g. the owner's Solana
+    /// wallet). Only the owner sets it, so a leaked agent key can't point a fill at its own address.
+    mapping(uint32 => bytes32) public crossRecipient;
 
     event Swapped(
         address indexed by, address indexed tokenIn, address indexed tokenOut, uint256 amountIn, uint256 amountOut
@@ -102,6 +141,13 @@ contract SableAccount is Initializable, ReentrancyGuard, EIP712 {
     event RouterSet(address indexed router, bool allowed);
     event CooldownSet(uint64 cooldown);
     event PayoutSet(address payout);
+    event OrderPlaced(uint256 indexed id, address indexed tokenIn, address indexed vault, uint128 amountIn, uint32 destChainId);
+    event OrderFilled(uint256 indexed id, uint256 spent, uint256 amountOut, uint256 yieldKept);
+    event CrossFilled(
+        uint256 indexed id, bytes32 depositId, uint32 destChainId, bytes32 recipient, bytes32 destToken, uint256 paid
+    );
+    event OrderCancelled(uint256 indexed id, uint256 returned);
+    event CrossRecipientSet(uint32 indexed chainId, bytes32 recipient);
 
     error NotOwner();
     error NotAuthorized();
@@ -117,6 +163,10 @@ contract SableAccount is Initializable, ReentrancyGuard, EIP712 {
     error Expired();
     error NonceUsed();
     error GasFeeTooHigh();
+    error NoOrder();
+    error BadOrder();
+    error VaultNotAllowed();
+    error NoDepository();
 
     modifier onlyOwner() {
         if (msg.sender != owner) revert NotOwner();
@@ -144,6 +194,9 @@ contract SableAccount is Initializable, ReentrancyGuard, EIP712 {
             emit RouterSet(routers[i], true);
         }
         emit AgentSet(agent_, 0);
+        // MON sent to the predicted address before the account existed arrived without receive();
+        // wrap it now so the deposit address works for native MON from the first second.
+        if (address(this).balance != 0) wmon.deposit{value: address(this).balance}();
     }
 
     /// @notice Native MON sent to the account is wrapped on arrival, so a deposit is a plain send.
@@ -285,6 +338,129 @@ contract SableAccount is Initializable, ReentrancyGuard, EIP712 {
         }
     }
 
+    // ───────────────────────── limit orders (D17) ─────────────────────────
+
+    /// @notice Place a limit order from the account's balance. Its funds move into `p.vault`, an
+    /// allowlisted ERC-4626 vault of `tokenIn`, and earn there until the order fills or is cancelled.
+    function placeOrder(OrderParams calldata p) external onlyOwner nonReentrant returns (uint256) {
+        return _place(p);
+    }
+
+    /// @notice An order the agent signed, relayed by anyone. Agent caps apply to `amountIn`; a local
+    /// order must buy a Shield-listed token, and a cross-chain one must pay the owner-approved recipient.
+    function placeOrderWithSig(
+        OrderParams calldata p,
+        uint256 nonce,
+        uint256 sigDeadline,
+        uint64 epoch,
+        bytes calldata sig
+    ) external nonReentrant returns (uint256) {
+        // All OrderParams fields are static, so abi.encode lays them out exactly as EIP-712 encodeData.
+        _useAgentSig(keccak256(abi.encode(PLACE_TYPEHASH, p, nonce, sigDeadline, epoch)), nonce, sigDeadline, epoch, sig);
+        if (p.destChainId == 0) {
+            _checkAgent(p.tokenIn, p.amountIn, p.tokenOut);
+        } else {
+            if (p.recipient != crossRecipient[p.destChainId]) revert NotAuthorized();
+            _checkAgent(p.tokenIn, p.amountIn, p.tokenIn);
+        }
+        return _place(p);
+    }
+
+    function _place(OrderParams calldata p) private returns (uint256 id) {
+        bool cross = p.destChainId != 0;
+        bool shapeOk = cross
+            ? p.tokenOut == address(0) && p.recipient != bytes32(0) && p.destMinOut != 0
+            : p.tokenOut != address(0) && p.minOut != 0;
+        if (!shapeOk || p.amountIn == 0 || p.deadline <= block.timestamp) revert BadOrder();
+        if (!registry.vaultAllowed(p.vault) || IERC4626(p.vault).asset() != p.tokenIn) revert VaultNotAllowed();
+
+        IERC20(p.tokenIn).forceApprove(p.vault, p.amountIn);
+        uint256 shares = IERC4626(p.vault).deposit(p.amountIn, address(this));
+        IERC20(p.tokenIn).forceApprove(p.vault, 0);
+        id = ++orderCount;
+        _orders[id] = LimitOrder(p, shares);
+        emit OrderPlaced(id, p.tokenIn, p.vault, p.amountIn, p.destChainId);
+    }
+
+    /// @notice A keeper fills a local order when the market meets its limit. The order's shares are
+    /// redeemed, `amountIn` (or what they are worth, if less) is swapped, and any yield above
+    /// `amountIn` stays in the account. `minOut` binds: the price can't be worse than the limit.
+    function fillOrder(uint256 id, address router, bytes calldata data, uint256 gasFee)
+        external
+        nonReentrant
+        returns (uint256 amountOut)
+    {
+        (OrderParams memory p, uint256 spend, uint256 kept) = _takeOrder(id, false);
+        amountOut = _swap(SwapOrder(router, p.tokenIn, spend, p.tokenOut, p.minOut, gasFee, 0, 0, 0), data);
+        emit OrderFilled(id, spend, amountOut, kept);
+    }
+
+    /// @notice A keeper fills a cross-chain order by paying Relay's depository from this account.
+    /// The contract builds the deposit itself; the keeper supplies only Relay's `depositId`, which it
+    /// must have quoted for this order's recipient, token and `destMinOut` (the trust bound in D17).
+    function fillCrossOrder(uint256 id, bytes32 depositId, uint256 gasFee) external nonReentrant {
+        (OrderParams memory p, uint256 spend, uint256 kept) = _takeOrder(id, true);
+        address depository = registry.relayDepository();
+        if (depository == address(0)) revert NoDepository();
+        uint256 net = _takeFee(p.tokenIn, spend);
+        if (gasFee != 0) {
+            _payGas(p.tokenIn, gasFee, net);
+            net -= gasFee;
+        }
+        IERC20(p.tokenIn).forceApprove(depository, net); // exactly: the depository can't take more
+        IRelayDepository(depository).depositErc20(address(this), p.tokenIn, net, depositId);
+        IERC20(p.tokenIn).forceApprove(depository, 0);
+        emit CrossFilled(id, depositId, p.destChainId, p.recipient, p.destToken, net);
+        emit OrderFilled(id, spend, net, kept);
+    }
+
+    /// Keeper-only: checks the order's kind and expiry, deletes it and redeems its shares.
+    function _takeOrder(uint256 id, bool cross) private returns (OrderParams memory p, uint256 spend, uint256 kept) {
+        if (!registry.isKeeper(msg.sender)) revert NotAuthorized();
+        LimitOrder memory o = _orders[id];
+        p = o.p;
+        if (p.amountIn == 0) revert NoOrder();
+        if ((p.destChainId != 0) != cross) revert BadOrder();
+        if (block.timestamp > p.deadline) revert Expired();
+        delete _orders[id];
+        uint256 assets = IERC4626(p.vault).redeem(o.shares, address(this), address(this));
+        spend = assets < p.amountIn ? assets : p.amountIn;
+        kept = assets - spend;
+    }
+
+    /// @notice Cancel an order: its shares are redeemed into the account, yield included. The owner
+    /// may cancel any time; a keeper only after the order expired (it can only return funds).
+    function cancelOrder(uint256 id) external nonReentrant {
+        bool expiredByKeeper = registry.isKeeper(msg.sender) && block.timestamp > _orders[id].p.deadline;
+        if (msg.sender != owner && !expiredByKeeper) revert NotAuthorized();
+        _cancel(id);
+    }
+
+    function cancelOrderWithSig(uint256 id, uint256 nonce, uint256 deadline, uint64 epoch, bytes calldata sig)
+        external
+        nonReentrant
+    {
+        _useAgentSig(keccak256(abi.encode(CANCEL_TYPEHASH, id, nonce, deadline, epoch)), nonce, deadline, epoch, sig);
+        _cancel(id);
+    }
+
+    function _cancel(uint256 id) private {
+        LimitOrder memory o = _orders[id];
+        if (o.p.amountIn == 0) revert NoOrder();
+        delete _orders[id];
+        emit OrderCancelled(id, IERC4626(o.p.vault).redeem(o.shares, address(this), address(this)));
+    }
+
+    function order(uint256 id) external view returns (LimitOrder memory) {
+        return _orders[id];
+    }
+
+    /// @notice What an open order is worth right now, yield included; 0 once filled or cancelled.
+    function orderValue(uint256 id) external view returns (uint256) {
+        LimitOrder memory o = _orders[id];
+        return o.p.amountIn == 0 ? 0 : IERC4626(o.p.vault).convertToAssets(o.shares);
+    }
+
     // ───────────────────────── withdrawals ─────────────────────────
 
     function withdraw(address token, uint256 amount, address to) external onlyOwner nonReentrant {
@@ -331,6 +507,12 @@ contract SableAccount is Initializable, ReentrancyGuard, EIP712 {
     function setPayout(address payout_) external onlyOwner {
         payout = payout_;
         emit PayoutSet(payout_);
+    }
+
+    /// @notice Where agent-placed cross-chain orders to `chainId` may deliver. bytes32(0) disables it.
+    function setCrossRecipient(uint32 chainId, bytes32 recipient) external onlyOwner {
+        crossRecipient[chainId] = recipient;
+        emit CrossRecipientSet(chainId, recipient);
     }
 
     /// @notice Replace or remove (address(0)) the agent. Every change starts a new key epoch.
