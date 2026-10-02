@@ -20,7 +20,7 @@ const RPC = env.RPC_URL || 'https://rpc.monad.xyz';
 const FACTORY = getAddress(need('FACTORY'));
 const USDC = '0x754704Bc059F8C67012fEd69BC8A327a5aafb603';
 const WMON = '0x3bd359C1119dA7Da1D913D1C4D2B7c461115433A';
-const ORIGIN = env.ALLOWED_ORIGIN || 'https://sabledex.vercel.app';
+const ORIGINS = (env.ALLOWED_ORIGIN || 'https://sabledex.vercel.app').split(',').map((o) => o.trim()); // comma-separated
 
 const monad = defineChain({ id: 143, name: 'Monad', nativeCurrency: { name: 'MON', symbol: 'MON', decimals: 18 },
   rpcUrls: { default: { http: [RPC] } }, contracts: { multicall3: { address: '0xcA11bde05977b3631167028862bE2a173976CA11' } } });
@@ -45,11 +45,12 @@ every(5_000, async function fill() { await filler.tick(ledger.openOrders()); });
 
 // ── HTTP: health, points, relay ──
 const reply = (res, status, body) => {
-  res.writeHead(status, { 'content-type': 'application/json', 'access-control-allow-origin': ORIGIN, 'access-control-allow-headers': 'content-type' });
+  res.writeHead(status, { 'content-type': 'application/json', 'access-control-allow-headers': 'content-type', vary: 'origin' });
   res.end(JSON.stringify(body));
 };
 http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://keeper');
+  res.setHeader('access-control-allow-origin', ORIGINS.includes(req.headers.origin) ? req.headers.origin : ORIGINS[0]);
   if (req.method === 'OPTIONS') return reply(res, 204, {});
   if (req.method === 'GET' && url.pathname === '/health') return reply(res, 200, { ok: true, cursor: String(ledger.cursor), open: ledger.openOrders().length, watchOnly: !wallet });
   const points = url.pathname.match(/^\/points\/(0x[0-9a-fA-F]{40})$/);
