@@ -40,8 +40,18 @@ log(`keeper ${signer ? signer.address : `${keeper} (watch-only)`} · factory ${F
 
 // ── loops: follow the chain every 2s, look at open orders every 5s ──
 const every = (ms, fn) => { const run = async () => { try { await fn(); } catch (e) { log(`${fn.name}: ${e.shortMessage ?? e.message}`); } setTimeout(run, ms); }; run(); };
-every(2_000, async function sync() { await ledger.sync(); });
-every(5_000, async function fill() { await filler.tick(ledger.openOrders()); });
+// One keeper key, one nonce sequence: every pass over orders waits for the previous one.
+let queue = Promise.resolve();
+const tick = (orders) => (queue = queue.then(() => filler.tick(orders)));
+// A new order gets its first look right after the sync that saw it, not on the next 5s pass.
+const seen = new Set();
+every(2_000, async function sync() {
+  await ledger.sync();
+  const fresh = ledger.openOrders().filter((o) => !seen.has(`${o.account}#${o.id}`));
+  fresh.forEach((o) => seen.add(`${o.account}#${o.id}`));
+  if (fresh.length) await tick(fresh);
+});
+every(5_000, async function fill() { await tick(ledger.openOrders()); });
 
 // ── HTTP: health, points, relay ──
 const reply = (res, status, body) => {
