@@ -25,7 +25,9 @@ const ORIGIN = env.ALLOWED_ORIGIN || 'https://sabledex.vercel.app';
 const monad = defineChain({ id: 143, name: 'Monad', nativeCurrency: { name: 'MON', symbol: 'MON', decimals: 18 },
   rpcUrls: { default: { http: [RPC] } }, contracts: { multicall3: { address: '0xcA11bde05977b3631167028862bE2a173976CA11' } } });
 const pub = createPublicClient({ chain: monad, transport: transport(RPC), batch: { multicall: true } });
-const signer = env.KEEPER_PRIVATE_KEY ? privateKeyToAccount(env.KEEPER_PRIVATE_KEY) : null;
+// MetaMask exports keys without 0x; accept both.
+const rawKey = env.KEEPER_PRIVATE_KEY?.trim();
+const signer = rawKey ? privateKeyToAccount(rawKey.startsWith('0x') ? rawKey : `0x${rawKey}`) : null;
 const wallet = signer ? createWalletClient({ chain: monad, transport: transport(RPC), account: signer }) : null;
 const keeper = signer ?? getAddress(need('KEEPER_ADDRESS'));
 const registry = await pub.readContract({ address: FACTORY, abi: factoryAbi, functionName: 'registry' });
