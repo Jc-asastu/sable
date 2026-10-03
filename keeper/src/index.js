@@ -27,7 +27,7 @@ const keeper = signer ?? getAddress(need('KEEPER_ADDRESS'));
 const CHAINS = [
   { id: 143, name: 'Monad', sym: 'MON', kyber: 'monad', rpc: env.RPC_URL || 'https://rpc.monad.xyz', factory: need('FACTORY'), start: need('START_BLOCK'),
     stateFile: env.STATE_FILE || 'state.json', usdc: '0x754704Bc059F8C67012fEd69BC8A327a5aafb603', wrapped: '0x3bd359C1119dA7Da1D913D1C4D2B7c461115433A' },
-  env.BASE_FACTORY && { id: 8453, name: 'Base', sym: 'ETH', kyber: 'base', rpc: env.BASE_RPC_URL || 'https://mainnet.base.org,https://base-rpc.publicnode.com,https://base.llamarpc.com,https://1rpc.io/base', factory: env.BASE_FACTORY, start: need('BASE_START_BLOCK'),
+  env.BASE_FACTORY && { id: 8453, name: 'Base', sym: 'ETH', kyber: 'base', rpc: env.BASE_RPC_URL || 'https://developer-access-mainnet.base.org,https://base-rpc.publicnode.com,https://base.drpc.org,https://mainnet.base.org', factory: env.BASE_FACTORY, start: need('BASE_START_BLOCK'),
     stateFile: env.BASE_STATE_FILE || 'state-base.json', usdc: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913', wrapped: '0x4200000000000000000000000000000000000006' },
 ].filter(Boolean);
 
