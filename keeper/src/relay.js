@@ -30,8 +30,28 @@ export function createRelay({ pub, wallet, keeper, factory, log = console.log })
     return expected.toLowerCase() === account.toLowerCase();
   }
 
+  /**
+   * Sponsored opening (D19): the owner signed OpenAccount; the keeper pays the gas. The factory
+   * checks the signature, so a bad one only costs a failed estimate here.
+   */
+  async function open({ owner, agent, routers, cooldown, deadline, sig }, ip) {
+    if (!isAddress(owner) || !isAddress(agent) || !Array.isArray(routers) || routers.length > 8 || !routers.every(isAddress) || !isHex(sig)) return { status: 400, error: 'owner, agent, routers and sig required' };
+    if (!allow(`ip:${ip}`, LIMIT.perIp) || !allow(`open:${owner.toLowerCase()}`, 5)) return { status: 429, error: 'slow down' };
+    if (!wallet) return { status: 503, error: 'relayer is in watch-only mode' };
+    try {
+      const args = [owner, agent, routers, BigInt(cooldown ?? 0), BigInt(deadline), sig];
+      const gasPrice = (await pub.getGasPrice()) * 11n / 10n;
+      const gas = (await pub.estimateContractGas({ address: factory, abi: factoryAbi, functionName: 'createAccountFor', args, account: keeper })) * 12n / 10n;
+      const hash = await wallet.writeContract({ address: factory, abi: factoryAbi, functionName: 'createAccountFor', args, gas, gasPrice, account: keeper });
+      log(`opened account for ${owner}: ${hash}`);
+      return { status: 200, hash };
+    } catch (e) {
+      return { status: 422, error: e.shortMessage ?? 'the call would revert' };
+    }
+  }
+
   /** { account, data } → { hash } or { error, status }. */
-  return async function relay({ account, data }, ip) {
+  async function relay({ account, data }, ip) {
     if (!isAddress(account) || !isHex(data) || data.length > 2 + MAX_DATA * 2) return { status: 400, error: 'account and calldata required' };
     let fn;
     try { fn = decodeFunctionData({ abi: relayable, data }).functionName; } catch { return { status: 400, error: 'not a relayable call' }; }
@@ -47,5 +67,7 @@ export function createRelay({ pub, wallet, keeper, factory, log = console.log })
     } catch (e) {
       return { status: 422, error: e.shortMessage ?? 'the call would revert' };
     }
-  };
+  }
+
+  return { relay, open };
 }

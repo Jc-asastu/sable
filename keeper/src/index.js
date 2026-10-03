@@ -16,61 +16,78 @@ import { createRelay } from './relay.js';
 
 const env = process.env;
 const need = (name) => { if (!env[name]) throw new Error(`${name} is required`); return env[name]; };
-const RPC = env.RPC_URL || 'https://rpc.monad.xyz';
-const FACTORY = getAddress(need('FACTORY'));
-const USDC = '0x754704Bc059F8C67012fEd69BC8A327a5aafb603';
-const WMON = '0x3bd359C1119dA7Da1D913D1C4D2B7c461115433A';
 const ORIGINS = (env.ALLOWED_ORIGIN || 'https://sabledex.vercel.app').split(',').map((o) => o.trim()); // comma-separated
-
-const monad = defineChain({ id: 143, name: 'Monad', nativeCurrency: { name: 'MON', symbol: 'MON', decimals: 18 },
-  rpcUrls: { default: { http: [RPC] } }, contracts: { multicall3: { address: '0xcA11bde05977b3631167028862bE2a173976CA11' } } });
-const pub = createPublicClient({ chain: monad, transport: transport(RPC), batch: { multicall: true } });
-// MetaMask exports keys without 0x; accept both.
+const log = (m) => console.log(new Date().toISOString(), m);
+// MetaMask exports keys without 0x; accept both. One keeper key serves every chain.
 const rawKey = env.KEEPER_PRIVATE_KEY?.trim();
 const signer = rawKey ? privateKeyToAccount(rawKey.startsWith('0x') ? rawKey : `0x${rawKey}`) : null;
-const wallet = signer ? createWalletClient({ chain: monad, transport: transport(RPC), account: signer }) : null;
 const keeper = signer ?? getAddress(need('KEEPER_ADDRESS'));
-const registry = await pub.readContract({ address: FACTORY, abi: factoryAbi, functionName: 'registry' });
 
-const log = (m) => console.log(new Date().toISOString(), m);
-const ledger = createLedger({ pub, factory: FACTORY, usdc: USDC, stateFile: env.STATE_FILE || 'state.json', startBlock: BigInt(need('START_BLOCK')), log });
-const filler = createFiller({ pub, wallet, keeper, registry, wmon: WMON, usdc: USDC, log });
-const relay = createRelay({ pub, wallet, keeper, factory: FACTORY, log });
-log(`keeper ${signer ? signer.address : `${keeper} (watch-only)`} · factory ${FACTORY} · registry ${registry}`);
+// Monad is always on (FACTORY, START_BLOCK…); Base joins when BASE_FACTORY is set (D19).
+const CHAINS = [
+  { id: 143, name: 'Monad', sym: 'MON', kyber: 'monad', rpc: env.RPC_URL || 'https://rpc.monad.xyz', factory: need('FACTORY'), start: need('START_BLOCK'),
+    stateFile: env.STATE_FILE || 'state.json', usdc: '0x754704Bc059F8C67012fEd69BC8A327a5aafb603', wrapped: '0x3bd359C1119dA7Da1D913D1C4D2B7c461115433A' },
+  env.BASE_FACTORY && { id: 8453, name: 'Base', sym: 'ETH', kyber: 'base', rpc: env.BASE_RPC_URL || 'https://mainnet.base.org', factory: env.BASE_FACTORY, start: need('BASE_START_BLOCK'),
+    stateFile: env.BASE_STATE_FILE || 'state-base.json', usdc: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913', wrapped: '0x4200000000000000000000000000000000000006' },
+].filter(Boolean);
 
-// ── loops: follow the chain every 2s, look at open orders every 5s ──
-const every = (ms, fn) => { const run = async () => { try { await fn(); } catch (e) { log(`${fn.name}: ${e.shortMessage ?? e.message}`); } setTimeout(run, ms); }; run(); };
-// One keeper key, one nonce sequence: every pass over orders waits for the previous one.
-let queue = Promise.resolve();
-const tick = (orders) => (queue = queue.then(() => filler.tick(orders)));
-// A new order gets its first look right after the sync that saw it, not on the next 5s pass.
-const seen = new Set();
-every(2_000, async function sync() {
-  await ledger.sync();
-  const fresh = ledger.openOrders().filter((o) => !seen.has(`${o.account}#${o.id}`));
-  fresh.forEach((o) => seen.add(`${o.account}#${o.id}`));
-  if (fresh.length) await tick(fresh);
-});
-every(5_000, async function fill() { await tick(ledger.openOrders()); });
+const every = (ms, fn, tag) => { const run = async () => { try { await fn(); } catch (e) { log(`${tag} ${fn.name}: ${e.shortMessage ?? e.message}`); } setTimeout(run, ms); }; run(); };
+const nets = new Map();
+for (const c of CHAINS) {
+  const chain = defineChain({ id: c.id, name: c.name, nativeCurrency: { name: c.sym, symbol: c.sym, decimals: 18 },
+    rpcUrls: { default: { http: [c.rpc] } }, contracts: { multicall3: { address: '0xcA11bde05977b3631167028862bE2a173976CA11' } } });
+  const pub = createPublicClient({ chain, transport: transport(c.rpc), batch: { multicall: true } });
+  const wallet = signer ? createWalletClient({ chain, transport: transport(c.rpc), account: signer }) : null;
+  const factory = getAddress(c.factory);
+  const registry = await pub.readContract({ address: factory, abi: factoryAbi, functionName: 'registry' });
+  const tagged = (m) => log(`[${c.name}] ${m}`);
+  const ledger = createLedger({ pub, factory, usdc: c.usdc, stateFile: c.stateFile, startBlock: BigInt(c.start), log: tagged });
+  const filler = createFiller({ pub, wallet, keeper, registry, wmon: c.wrapped, usdc: c.usdc, chainId: c.id, kyberChain: c.kyber, log: tagged });
+  const relay = createRelay({ pub, wallet, keeper, factory, log: tagged });
+  nets.set(c.id, { ledger, relay, wallet });
+  tagged(`keeper ${signer ? signer.address : `${keeper} (watch-only)`} · factory ${factory} · registry ${registry}`);
 
-// ── HTTP: health, points, relay ──
+  // One key, one nonce sequence per chain: every pass over orders waits for the previous one.
+  let queue = Promise.resolve();
+  const tick = (orders) => (queue = queue.then(() => filler.tick(orders)));
+  // A new order gets its first look right after the sync that saw it, not on the next 5s pass.
+  const seen = new Set();
+  every(2_000, async function sync() {
+    await ledger.sync();
+    const fresh = ledger.openOrders().filter((o) => !seen.has(`${o.account}#${o.id}`));
+    fresh.forEach((o) => seen.add(`${o.account}#${o.id}`));
+    if (fresh.length) await tick(fresh);
+  }, c.name);
+  every(5_000, async function fill() { await tick(ledger.openOrders()); }, c.name);
+}
+
+// ── HTTP: health, points, relay, open ──
 const reply = (res, status, body) => {
   res.writeHead(status, { 'content-type': 'application/json', 'access-control-allow-headers': 'content-type', vary: 'origin' });
   res.end(JSON.stringify(body));
 };
+const netOf = (input) => nets.get(Number(input?.chainId ?? 143));
 http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://keeper');
   res.setHeader('access-control-allow-origin', ORIGINS.includes(req.headers.origin) ? req.headers.origin : ORIGINS[0]);
   if (req.method === 'OPTIONS') return reply(res, 204, {});
-  if (req.method === 'GET' && url.pathname === '/health') return reply(res, 200, { ok: true, cursor: String(ledger.cursor), open: ledger.openOrders().length, watchOnly: !wallet });
+  const monad = nets.get(143);
+  if (req.method === 'GET' && url.pathname === '/health') return reply(res, 200, { ok: true, cursor: String(monad.ledger.cursor), open: monad.ledger.openOrders().length, watchOnly: !monad.wallet,
+    chains: Object.fromEntries([...nets].map(([id, n]) => [id, { cursor: String(n.ledger.cursor), open: n.ledger.openOrders().length }])) });
   const points = url.pathname.match(/^\/points\/(0x[0-9a-fA-F]{40})$/);
-  if (req.method === 'GET' && points) return reply(res, 200, ledger.pointsOf(points[1]));
-  if (req.method === 'POST' && url.pathname === '/relay') {
+  if (req.method === 'GET' && points) {
+    // ponytail: points add up across chains; the multiplier is the best single chain's, until dollar-days are pooled.
+    const all = [...nets.values()].map((n) => n.ledger.pointsOf(points[1]));
+    return reply(res, 200, { points: all.reduce((a, p) => a + p.points, 0), multiplier: Math.max(...all.map((p) => p.multiplier)) });
+  }
+  if (req.method === 'POST' && (url.pathname === '/relay' || url.pathname === '/open')) {
     let body = '';
     for await (const chunk of req) { body += chunk; if (body.length > 40_000) return reply(res, 413, { error: 'too large' }); }
     let input;
     try { input = JSON.parse(body); } catch { return reply(res, 400, { error: 'json body required' }); }
-    const out = await relay(input ?? {}, req.socket.remoteAddress);
+    const net = netOf(input);
+    if (!net) return reply(res, 400, { error: 'unsupported chain' });
+    const out = url.pathname === '/open' ? await net.relay.open(input, req.socket.remoteAddress) : await net.relay.relay(input, req.socket.remoteAddress);
     return reply(res, out.status, out.hash ? { hash: out.hash } : { error: out.error });
   }
   reply(res, 404, { error: 'not found' });

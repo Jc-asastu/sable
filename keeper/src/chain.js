@@ -5,6 +5,7 @@ export const SOLANA = 792703809;
 
 export const factoryAbi = parseAbi([
   'event AccountCreated(address indexed owner, address account)',
+  'function createAccountFor(address owner, address agent, address[] routers, uint64 cooldown, uint256 deadline, bytes sig) returns (address)',
   'function accountOf(address owner) view returns (address)',
   'function registry() view returns (address)',
 ]);

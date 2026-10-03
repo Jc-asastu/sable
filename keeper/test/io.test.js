@@ -134,7 +134,7 @@ test('the relayer only sends agent-signed calls for real Sable accounts, within 
     readContract: async ({ functionName, args }) => (functionName === 'owner' ? OWNER : args[0] === OWNER ? ACCOUNT : A(0xbad)),
     getGasPrice: async () => 1n, estimateGas: async () => 100_000n,
   };
-  const relay = createRelay({ pub, wallet: { sendTransaction: async (tx) => { sent.push(tx); return '0xhash'; } }, keeper: KEEPER, factory: FACTORY, log() {} });
+  const { relay } = createRelay({ pub, wallet: { sendTransaction: async (tx) => { sent.push(tx); return '0xhash'; } }, keeper: KEEPER, factory: FACTORY, log() {} });
   const cancel = encodeFunctionData({ abi: parseAbi(['function cancelOrderWithSig(uint256 id, uint256 nonce, uint256 deadline, uint64 epoch, bytes sig)']),
     functionName: 'cancelOrderWithSig', args: [1n, 2n, 3n, 0n, '0x1234'] });
   const ownerOnly = encodeFunctionData({ abi: parseAbi(['function withdraw(address token, uint256 amount, address to)']),
@@ -149,4 +149,23 @@ test('the relayer only sends agent-signed calls for real Sable accounts, within 
   let limited;
   for (let i = 0; i < 40; i++) limited = await relay({ account: ACCOUNT, data: cancel }, 'ip2');
   assert.equal(limited.status, 429, 'per-account rate limit');
+});
+
+test('sponsored opening sends createAccountFor to the factory, and refuses bad input or a reverting signature', async () => {
+  const sent = [];
+  let reverts = false;
+  const pub = { getGasPrice: async () => 1n, estimateContractGas: async () => { if (reverts) throw Object.assign(new Error('x'), { shortMessage: 'BadSignature' }); return 200_000n; } };
+  const { open } = createRelay({ pub, wallet: { writeContract: async (tx) => { sent.push(tx); return '0xopen'; } }, keeper: KEEPER, factory: FACTORY, log() {} });
+  const req = { owner: OWNER, agent: A(0xa9e), routers: [A(0x1234)], cooldown: 0, deadline: 9_999_999_999, sig: '0x1234' };
+
+  assert.deepEqual(await open(req, 'ip9'), { status: 200, hash: '0xopen' });
+  assert.equal(sent[0].address, FACTORY);
+  assert.equal(sent[0].functionName, 'createAccountFor');
+  assert.equal(sent[0].args[0], OWNER);
+  assert.equal((await open({ ...req, sig: 'nothex' }, 'ip9')).status, 400);
+  assert.equal((await open({ ...req, routers: 'x' }, 'ip9')).status, 400);
+  reverts = true;
+  assert.deepEqual(await open(req, 'ip9'), { status: 422, error: 'BadSignature' });
+  const watch = createRelay({ pub, wallet: null, keeper: KEEPER, factory: FACTORY, log() {} });
+  assert.equal((await watch.open(req, 'ip8')).status, 503);
 });

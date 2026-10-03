@@ -2,7 +2,6 @@
 // Every transaction is simulated first: a fill that would revert costs nothing.
 import { accountAbi, registryAbi, recipientFor, currencyFor, depositIdFrom, gasFeeIn } from './chain.js';
 
-const KYBER = 'https://aggregator-api.kyberswap.com/monad/api/v1';
 const RELAY = 'https://api.relay.link';
 const SLIPPAGE_BPS = 50n;
 const CROSS_GAS = 700_000n; // fillCrossOrder budget: vault redeem + fee + Relay deposit, with headroom
@@ -17,10 +16,11 @@ async function json(url, options) {
  * `wallet` is null in watch-only mode: the filler then logs what it would send and sends nothing.
  * `send(request)` returns a tx hash and waits for its receipt.
  */
-export function createFiller({ pub, wallet, keeper, registry, wmon, usdc, log = console.log }) {
+export function createFiller({ pub, wallet, keeper, registry, wmon, usdc, chainId = 143, kyberChain = 'monad', log = console.log }) {
+  const KYBER = `https://aggregator-api.kyberswap.com/${kyberChain}/api/v1`;
   let monUsd = 0, monUsdAt = 0;
 
-  /** MON price from a 100-MON Kyber quote, refreshed each minute. */
+  /** Native token price from a 100-unit Kyber quote (wrapped native → USDC), refreshed each minute. */
   async function monPrice() {
     if (Date.now() - monUsdAt < 60_000 && monUsd > 0) return monUsd;
     const q = await json(`${KYBER}/routes?tokenIn=${wmon}&tokenOut=${usdc}&amountIn=${10n ** 20n}`, { headers: { 'x-client-id': 'sable' } });
@@ -29,7 +29,7 @@ export function createFiller({ pub, wallet, keeper, registry, wmon, usdc, log = 
     return monUsd;
   }
   const gasPrice = async () => (await pub.getGasPrice()) * 11n / 10n;
-  // Monad charges the gas limit, not the gas used: the limit is the cost.
+  // Monad charges the gas limit, not the gas used: pricing the limit is exact there and safe elsewhere.
   const gasUsd = async (limit) => Number(limit * (await gasPrice())) / 1e18 * (await monPrice());
 
   async function send(account, functionName, args, gas) {
@@ -67,7 +67,7 @@ export function createFiller({ pub, wallet, keeper, registry, wmon, usdc, log = 
     if (gasFee === null) return;
     const amount = afterFee - gasFee;
     const quote = await json(`${RELAY}/quote`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({
-      user: account, recipient: recipientFor(p.destChainId, p.recipient), originChainId: 143, destinationChainId: p.destChainId,
+      user: account, recipient: recipientFor(p.destChainId, p.recipient), originChainId: chainId, destinationChainId: p.destChainId,
       originCurrency: p.tokenIn, destinationCurrency: currencyFor(p.destChainId, p.destToken), amount: String(amount), tradeType: 'EXACT_INPUT',
     }) });
     if (BigInt(quote.details?.currencyOut?.amount ?? 0) < p.destMinOut) return; // not at the limit yet
