@@ -7,7 +7,7 @@
 // Without KEEPER_PRIVATE_KEY it runs watch-only: it reads, computes points and logs what it
 // would send (KEEPER_ADDRESS must then name a registered keeper so simulations pass).
 import http from 'node:http';
-import { createPublicClient, createWalletClient, http as transport, defineChain, getAddress } from 'viem';
+import { createPublicClient, createWalletClient, http as rpcHttp, fallback, defineChain, getAddress } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { factoryAbi } from './chain.js';
 import { createLedger } from './ledger.js';
@@ -27,7 +27,7 @@ const keeper = signer ?? getAddress(need('KEEPER_ADDRESS'));
 const CHAINS = [
   { id: 143, name: 'Monad', sym: 'MON', kyber: 'monad', rpc: env.RPC_URL || 'https://rpc.monad.xyz', factory: need('FACTORY'), start: need('START_BLOCK'),
     stateFile: env.STATE_FILE || 'state.json', usdc: '0x754704Bc059F8C67012fEd69BC8A327a5aafb603', wrapped: '0x3bd359C1119dA7Da1D913D1C4D2B7c461115433A' },
-  env.BASE_FACTORY && { id: 8453, name: 'Base', sym: 'ETH', kyber: 'base', rpc: env.BASE_RPC_URL || 'https://mainnet.base.org', factory: env.BASE_FACTORY, start: need('BASE_START_BLOCK'),
+  env.BASE_FACTORY && { id: 8453, name: 'Base', sym: 'ETH', kyber: 'base', rpc: env.BASE_RPC_URL || 'https://mainnet.base.org,https://base-rpc.publicnode.com,https://base.llamarpc.com,https://1rpc.io/base', factory: env.BASE_FACTORY, start: need('BASE_START_BLOCK'),
     stateFile: env.BASE_STATE_FILE || 'state-base.json', usdc: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913', wrapped: '0x4200000000000000000000000000000000000006' },
 ].filter(Boolean);
 
@@ -35,9 +35,11 @@ const every = (ms, fn, tag) => { const run = async () => { try { await fn(); } c
 const nets = new Map();
 for (const c of CHAINS) {
   const chain = defineChain({ id: c.id, name: c.name, nativeCurrency: { name: c.sym, symbol: c.sym, decimals: 18 },
-    rpcUrls: { default: { http: [c.rpc] } }, contracts: { multicall3: { address: '0xcA11bde05977b3631167028862bE2a173976CA11' } } });
-  const pub = createPublicClient({ chain, transport: transport(c.rpc), batch: { multicall: true } });
-  const wallet = signer ? createWalletClient({ chain, transport: transport(c.rpc), account: signer }) : null;
+    rpcUrls: { default: { http: c.rpc.split(',') } }, contracts: { multicall3: { address: '0xcA11bde05977b3631167028862bE2a173976CA11' } } });
+  // Public RPCs rate-limit; a comma list in the RPC variable rotates to the next one on failure.
+  const transport = () => fallback(c.rpc.split(',').map((u) => rpcHttp(u.trim(), { timeout: 15_000 })));
+  const pub = createPublicClient({ chain, transport: transport(), batch: { multicall: true } });
+  const wallet = signer ? createWalletClient({ chain, transport: transport(), account: signer }) : null;
   const factory = getAddress(c.factory);
   const registry = await pub.readContract({ address: factory, abi: factoryAbi, functionName: 'registry' });
   const tagged = (m) => log(`[${c.name}] ${m}`);
