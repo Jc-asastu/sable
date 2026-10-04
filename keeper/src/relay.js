@@ -62,12 +62,16 @@ export function createRelay({ pub, wallet, keeper, factory, log = console.log })
     if (!(await genuine(account).catch(() => false))) return { status: 400, error: 'not a Sable account' };
     if (!wallet) return { status: 503, error: 'relayer is in watch-only mode' };
     try {
+      const t0 = Date.now();
       const gas = (await pub.estimateGas({ account: keeper, to: account, data })) * 12n / 10n; // reverts here cost nothing
+      const t1 = Date.now();
       const hash = await wallet.sendTransaction({ to: account, data, gas });
+      const t2 = Date.now();
       log(`relayed ${fn} for ${account}: ${hash}`);
       // The keeper sits next to the RPC: it waits for the receipt (50ms polls) so the browser does not
       // have to poll from far away. On timeout the browser still waits on its own.
       const receipt = await pub.waitForTransactionReceipt?.({ hash, pollingInterval: 50, timeout: 8_000 }).catch(() => null);
+      log(`timing ${fn}: estimate ${t1 - t0}ms · send ${t2 - t1}ms · receipt ${Date.now() - t2}ms`);
       return receipt ? { status: 200, hash, mined: receipt.status } : { status: 200, hash };
     } catch (e) {
       return { status: 422, error: e.shortMessage ?? 'the call would revert' };
