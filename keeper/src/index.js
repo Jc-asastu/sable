@@ -7,12 +7,13 @@
 // Without KEEPER_PRIVATE_KEY it runs watch-only: it reads, computes points and logs what it
 // would send (KEEPER_ADDRESS must then name a registered keeper so simulations pass).
 import http from 'node:http';
-import { createPublicClient, createWalletClient, http as rpcHttp, fallback, defineChain, getAddress } from 'viem';
+import { createPublicClient, http as rpcHttp, fallback, defineChain, getAddress } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { factoryAbi } from './chain.js';
 import { createLedger } from './ledger.js';
 import { createFiller } from './filler.js';
 import { createRelay } from './relay.js';
+import { createSender } from './sender.js';
 
 const env = process.env;
 const need = (name) => { if (!env[name]) throw new Error(`${name} is required`); return env[name]; };
@@ -39,7 +40,7 @@ for (const c of CHAINS) {
   // Public RPCs rate-limit; a comma list in the RPC variable rotates to the next one on failure.
   const transport = () => fallback(c.rpc.split(',').map((u) => rpcHttp(u.trim(), { timeout: 15_000 })));
   const pub = createPublicClient({ chain, transport: transport(), batch: { multicall: true } });
-  const wallet = signer ? createWalletClient({ chain, transport: transport(), account: signer }) : null;
+  const wallet = signer ? createSender({ pub, account: signer, chainId: c.id, log: (m) => log(`[${c.name}] ${m}`) }) : null;
   const factory = getAddress(c.factory);
   const registry = await pub.readContract({ address: factory, abi: factoryAbi, functionName: 'registry' });
   const tagged = (m) => log(`[${c.name}] ${m}`);

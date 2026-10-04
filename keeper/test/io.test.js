@@ -169,3 +169,25 @@ test('sponsored opening sends createAccountFor to the factory, and refuses bad i
   const watch = createRelay({ pub, wallet: null, keeper: KEEPER, factory: FACTORY, log() {} });
   assert.equal((await watch.open(req, 'ip8')).status, 503);
 });
+
+test('the sender hands out nonces in order, asks the chain only at start and after a failure', async () => {
+  const { createSender } = await import('../src/sender.js');
+  let asked = 0, fail = false;
+  const sent = [];
+  const pub = {
+    getGasPrice: async () => 100n,
+    getTransactionCount: async () => { asked += 1; return 7; },
+    sendRawTransaction: async ({ serializedTransaction }) => { if (fail) throw new Error('nonce too low'); sent.push(serializedTransaction); return `0x${String(sent.length).padStart(64, '0')}`; },
+  };
+  const account = { address: KEEPER, signTransaction: async (tx) => JSON.stringify(tx, (_, v) => (typeof v === 'bigint' ? String(v) : v)) };
+  const s = createSender({ pub, account, chainId: 143, log() {} });
+  await Promise.all([s.sendTransaction({ to: ACCOUNT, data: '0x01', gas: 1n }), s.sendTransaction({ to: ACCOUNT, data: '0x02', gas: 1n })]);
+  assert.deepEqual(sent.map((t) => JSON.parse(t).nonce), [7, 8]);
+  assert.equal(JSON.parse(sent[0]).gasPrice, '110', 'gas price +10%');
+  assert.equal(asked, 1);
+  fail = true;
+  await assert.rejects(s.sendTransaction({ to: ACCOUNT, data: '0x03', gas: 1n }));
+  fail = false;
+  await s.sendTransaction({ to: ACCOUNT, data: '0x04', gas: 1n });
+  assert.equal(asked, 2, 'resynced after the failure');
+});

@@ -23,11 +23,15 @@ export function createRelay({ pub, wallet, keeper, factory, log = console.log })
     return recent.length <= max;
   };
 
-  /** Only a real Sable account: its owner's predicted account must be this address. */
+  /** Only a real Sable account: its owner's predicted account must be this address. Checked once per account. */
+  const verified = new Set();
   async function genuine(account) {
+    if (verified.has(account.toLowerCase())) return true;
     const owner = await pub.readContract({ address: account, abi: accountAbi, functionName: 'owner' });
     const expected = await pub.readContract({ address: factory, abi: factoryAbi, functionName: 'accountOf', args: [owner] });
-    return expected.toLowerCase() === account.toLowerCase();
+    const ok = expected.toLowerCase() === account.toLowerCase();
+    if (ok) verified.add(account.toLowerCase());
+    return ok;
   }
 
   /**
@@ -40,9 +44,8 @@ export function createRelay({ pub, wallet, keeper, factory, log = console.log })
     if (!wallet) return { status: 503, error: 'relayer is in watch-only mode' };
     try {
       const args = [owner, agent, routers, BigInt(cooldown ?? 0), BigInt(deadline), sig];
-      const gasPrice = (await pub.getGasPrice()) * 11n / 10n;
       const gas = (await pub.estimateContractGas({ address: factory, abi: factoryAbi, functionName: 'createAccountFor', args, account: keeper })) * 12n / 10n;
-      const hash = await wallet.writeContract({ address: factory, abi: factoryAbi, functionName: 'createAccountFor', args, gas, gasPrice, account: keeper });
+      const hash = await wallet.writeContract({ address: factory, abi: factoryAbi, functionName: 'createAccountFor', args, gas });
       log(`opened account for ${owner}: ${hash}`);
       return { status: 200, hash };
     } catch (e) {
@@ -59,9 +62,8 @@ export function createRelay({ pub, wallet, keeper, factory, log = console.log })
     if (!(await genuine(account).catch(() => false))) return { status: 400, error: 'not a Sable account' };
     if (!wallet) return { status: 503, error: 'relayer is in watch-only mode' };
     try {
-      const gasPrice = (await pub.getGasPrice()) * 11n / 10n;
       const gas = (await pub.estimateGas({ account: keeper, to: account, data })) * 12n / 10n; // reverts here cost nothing
-      const hash = await wallet.sendTransaction({ to: account, data, gas, gasPrice, account: keeper });
+      const hash = await wallet.sendTransaction({ to: account, data, gas });
       log(`relayed ${fn} for ${account}: ${hash}`);
       return { status: 200, hash };
     } catch (e) {
