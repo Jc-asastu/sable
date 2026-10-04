@@ -1,5 +1,5 @@
 // Contract interfaces and the encoding helpers the keeper needs. No I/O here.
-import { parseAbi, decodeFunctionData, getAddress, zeroAddress } from 'viem';
+import { parseAbi, parseAbiParameters, encodeAbiParameters, keccak256, decodeFunctionData, getAddress, zeroAddress } from 'viem';
 
 export const SOLANA = 792703809;
 
@@ -16,16 +16,22 @@ export const registryAbi = parseAbi([
   'function relayDepository() view returns (address)',
 ]);
 
-const orderTuple = '((address tokenIn, address vault, address tokenOut, uint64 deadline, uint32 destChainId, uint128 amountIn, uint128 minOut, uint128 destMinOut, bytes32 recipient, bytes32 destToken) p, uint256 shares)';
+const orderTuple = '((address tokenIn, address vault, uint64 deadline, uint128 amountIn, bytes32 commit) p, uint256 shares, bool byAgent)';
+// The hidden half of an order (D20): on-chain there is only keccak256(abi.encode(secret)).
+const secretTuple = '(address tokenOut, uint32 destChainId, uint128 minOut, uint128 destMinOut, bytes32 recipient, bytes32 destToken, bytes32 salt)';
+const secretParams = parseAbiParameters(secretTuple);
+
+/** The on-chain commitment to a secret; throws on a malformed one. */
+export const commitOf = (s) => keccak256(encodeAbiParameters(secretParams, [s]));
 export const accountAbi = parseAbi([
-  'event OrderPlaced(uint256 indexed id, address indexed tokenIn, address indexed vault, uint128 amountIn, uint32 destChainId)',
+  'event OrderPlaced(uint256 indexed id, address indexed tokenIn, address indexed vault, uint128 amountIn, bytes32 commit)',
   'event OrderFilled(uint256 indexed id, uint256 spent, uint256 amountOut, uint256 yieldKept)',
   'event OrderCancelled(uint256 indexed id, uint256 returned)',
   'function owner() view returns (address)',
   `function order(uint256 id) view returns (${orderTuple})`,
   'function orderValue(uint256 id) view returns (uint256)',
-  'function fillOrder(uint256 id, address router, bytes data, uint256 gasFee) returns (uint256)',
-  'function fillCrossOrder(uint256 id, bytes32 depositId, uint256 gasFee)',
+  `function fillOrder(uint256 id, ${secretTuple} s, address router, bytes data, uint256 gasFee) returns (uint256)`,
+  `function fillCrossOrder(uint256 id, ${secretTuple} s, bytes32 depositId, uint256 gasFee)`,
   'function cancelOrder(uint256 id)',
 ]);
 

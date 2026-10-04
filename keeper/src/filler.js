@@ -16,7 +16,8 @@ async function json(url, options) {
  * `wallet` is null in watch-only mode: the filler then logs what it would send and sends nothing.
  * `send(request)` returns a tx hash and waits for its receipt.
  */
-export function createFiller({ pub, wallet, keeper, registry, wmon, usdc, chainId = 143, kyberChain = 'monad', log = console.log }) {
+/** `secretOf(commit)` returns an order's hidden half, or nothing if the keeper never got it. */
+export function createFiller({ pub, wallet, keeper, registry, wmon, usdc, secretOf, chainId = 143, kyberChain = 'monad', log = console.log }) {
   const KYBER = `https://aggregator-api.kyberswap.com/${kyberChain}/api/v1`;
   let monUsd = 0, monUsdAt = 0;
 
@@ -42,40 +43,40 @@ export function createFiller({ pub, wallet, keeper, registry, wmon, usdc, chainI
     return hash;
   }
 
-  async function fillLocal(account, id, p, spend, feeBps) {
+  async function fillLocal(account, id, p, s, spend, feeBps) {
     const net = spend - spend * feeBps / 10_000n;
     const head = { headers: { 'x-client-id': 'sable', 'Content-Type': 'application/json' } };
     const route = (await json(`${KYBER}/routes?tokenIn=${p.tokenIn}&tokenOut=${p.tokenOut}&amountIn=${net}`, head)).data;
     const out = BigInt(route.routeSummary.amountOut);
-    if (out < p.minOut) return; // the market hasn't reached the limit yet
+    if (out < s.minOut) return; // the market hasn't reached the limit yet
     const build = (await json(`${KYBER}/route/build`, { method: 'POST', ...head,
       body: JSON.stringify({ routeSummary: route.routeSummary, sender: account, recipient: account, slippageTolerance: Number(SLIPPAGE_BPS) }) })).data;
     const worst = BigInt(build.amountOut) * (10_000n - SLIPPAGE_BPS) / 10_000n;
     const gas = (await pub.estimateContractGas({ address: account, abi: accountAbi, functionName: 'fillOrder',
-      args: [id, build.routerAddress, build.data, 0n], account: keeper })) * 12n / 10n;
+      args: [id, s, build.routerAddress, build.data, 0n], account: keeper })) * 12n / 10n;
     const unitUsd = Number(route.routeSummary.amountOutUsd) / Number(out);
     const gasFee = gasFeeIn(await gasUsd(gas), unitUsd, worst);
-    if (gasFee === null || worst < p.minOut + gasFee) return; // too small to cover gas, or too close to the limit
-    log(`fill ${account}#${id}: ${spend} in → ≥${worst} out (limit ${p.minOut}, gas ${gasFee})`);
-    await send(account, 'fillOrder', [id, build.routerAddress, build.data, gasFee], gas);
+    if (gasFee === null || worst < s.minOut + gasFee) return; // too small to cover gas, or too close to the limit
+    log(`fill ${account}#${id}: ${spend} in → ≥${worst} out (limit ${s.minOut}, gas ${gasFee})`);
+    await send(account, 'fillOrder', [id, s, build.routerAddress, build.data, gasFee], gas);
   }
 
-  async function fillCross(account, id, p, spend, feeBps) {
+  async function fillCross(account, id, p, s, spend, feeBps) {
     const depository = await pub.readContract({ address: registry, abi: registryAbi, functionName: 'relayDepository' });
     const afterFee = spend - spend * feeBps / 10_000n;
     const gasFee = gasFeeIn(await gasUsd(CROSS_GAS), 1e-6, afterFee); // paid in USDC (6 decimals)
     if (gasFee === null) return;
     const amount = afterFee - gasFee;
     const quote = await json(`${RELAY}/quote`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({
-      user: account, recipient: recipientFor(p.destChainId, p.recipient), originChainId: chainId, destinationChainId: p.destChainId,
-      originCurrency: p.tokenIn, destinationCurrency: currencyFor(p.destChainId, p.destToken), amount: String(amount), tradeType: 'EXACT_INPUT',
+      user: account, recipient: recipientFor(s.destChainId, s.recipient), originChainId: chainId, destinationChainId: s.destChainId,
+      originCurrency: p.tokenIn, destinationCurrency: currencyFor(s.destChainId, s.destToken), amount: String(amount), tradeType: 'EXACT_INPUT',
     }) });
-    if (BigInt(quote.details?.currencyOut?.amount ?? 0) < p.destMinOut) return; // not at the limit yet
+    if (BigInt(quote.details?.currencyOut?.amount ?? 0) < s.destMinOut) return; // not at the limit yet
     const step = quote.steps?.find((s) => s.id === 'deposit');
     // Throws unless Relay asks for exactly the deposit the contract will make (D17 trust bound).
     const depositId = depositIdFrom(step?.items?.[0]?.data, { depository, account, token: p.tokenIn, amount });
-    log(`cross fill ${account}#${id}: ${amount} → ${quote.details.currencyOut.amountFormatted} ${quote.details.currencyOut.currency.symbol} to ${recipientFor(p.destChainId, p.recipient)}`);
-    await send(account, 'fillCrossOrder', [id, depositId, gasFee], CROSS_GAS);
+    log(`cross fill ${account}#${id}: ${amount} → ${quote.details.currencyOut.amountFormatted} ${quote.details.currencyOut.currency.symbol} to ${recipientFor(s.destChainId, s.recipient)}`);
+    await send(account, 'fillCrossOrder', [id, s, depositId, gasFee], CROSS_GAS);
   }
 
   /** One pass over the open orders. One at a time: a single keeper key has one nonce sequence. */
@@ -89,10 +90,12 @@ export function createFiller({ pub, wallet, keeper, registry, wmon, usdc, chainI
         const { p } = await pub.readContract({ address: o.account, abi: accountAbi, functionName: 'order', args: [id] });
         if (p.amountIn === 0n) continue; // already closed; the ledger catches up on its next sync
         if (now > p.deadline) { await send(o.account, 'cancelOrder', [id], 400_000n); continue; }
+        const s = secretOf(p.commit);
+        if (!s) continue; // the owner never sent the hidden half: the order waits until cancelled or expired
         const value = await pub.readContract({ address: o.account, abi: accountAbi, functionName: 'orderValue', args: [id] });
         const spend = value < p.amountIn ? value : p.amountIn;
-        if (p.destChainId === 0) await fillLocal(o.account, id, p, spend, BigInt(feeBps));
-        else await fillCross(o.account, id, p, spend, BigInt(feeBps));
+        if (s.destChainId === 0) await fillLocal(o.account, id, p, s, spend, BigInt(feeBps));
+        else await fillCross(o.account, id, p, s, spend, BigInt(feeBps));
       } catch (e) {
         log(`order ${o.account}#${o.id}: ${e.shortMessage ?? e.message}`);
       }

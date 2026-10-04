@@ -8,7 +8,8 @@ const CHUNK = 100n; // Monad's eth_getLogs serves at most 100 blocks per call
 const ADDRESSES_PER_CALL = 500;
 
 export function createLedger({ pub, factory, usdc, stateFile, startBlock, log = console.log }) {
-  const fresh = { cursor: String(startBlock - 1n), accounts: {}, orders: {}, points: {} };
+  // secrets: the hidden half of each order by its commitment (D20). Only the keeper and the owner know them.
+  const fresh = { cursor: String(startBlock - 1n), accounts: {}, orders: {}, points: {}, secrets: {} };
   let state = fresh;
   try { state = { ...fresh, ...JSON.parse(fs.readFileSync(stateFile, 'utf8')) }; } catch { /* first run */ }
 
@@ -33,7 +34,7 @@ export function createLedger({ pub, factory, usdc, stateFile, startBlock, log = 
     const at = await timeOf(l.blockNumber);
     if (l.eventName === 'OrderPlaced') {
       state.orders[key] = { account, owner, id: String(l.args.id), usd: usdOf(l.args.tokenIn, l.args.amountIn),
-        tokenIn: l.args.tokenIn, destChainId: l.args.destChainId, openedAt: at, closedAt: null };
+        tokenIn: l.args.tokenIn, commit: l.args.commit, openedAt: at, closedAt: null };
       return;
     }
     const o = state.orders[key];
@@ -81,5 +82,14 @@ export function createLedger({ pub, factory, usdc, stateFile, startBlock, log = 
       return { points: Math.round(state.points[o] ?? 0), multiplier: Number(multiplier(dollarDays(ordersOf(o), now)).toFixed(2)) };
     },
     isAccount: (account) => Boolean(state.accounts[account.toLowerCase()]),
+    /** Keeps a secret the caller already checked against its on-chain commitment. Saved at once. */
+    remember(commit, secret) {
+      state.secrets[commit] = JSON.parse(JSON.stringify(secret, (_, v) => (typeof v === 'bigint' ? String(v) : v)));
+      save();
+    },
+    secretOf(commit) {
+      const s = state.secrets[commit];
+      return s && { ...s, minOut: BigInt(s.minOut), destMinOut: BigInt(s.destMinOut) };
+    },
   };
 }

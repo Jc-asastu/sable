@@ -3,7 +3,7 @@
 import { decodeFunctionData, parseAbi, isAddress, isHex } from 'viem';
 import { factoryAbi, accountAbi } from './chain.js';
 
-const order = '(address tokenIn, address vault, address tokenOut, uint64 deadline, uint32 destChainId, uint128 amountIn, uint128 minOut, uint128 destMinOut, bytes32 recipient, bytes32 destToken)';
+const order = '(address tokenIn, address vault, uint64 deadline, uint128 amountIn, bytes32 commit)';
 const relayable = parseAbi([
   `function placeOrderWithSig(${order} p, uint256 nonce, uint256 sigDeadline, uint64 epoch, bytes sig)`,
   'function cancelOrderWithSig(uint256 id, uint256 nonce, uint256 deadline, uint64 epoch, bytes sig)',

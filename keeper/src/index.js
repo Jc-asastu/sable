@@ -9,7 +9,7 @@
 import http from 'node:http';
 import { createPublicClient, http as rpcHttp, fallback, defineChain, getAddress } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
-import { factoryAbi } from './chain.js';
+import { factoryAbi, accountAbi, commitOf } from './chain.js';
 import { createLedger } from './ledger.js';
 import { createFiller } from './filler.js';
 import { createRelay } from './relay.js';
@@ -45,9 +45,9 @@ for (const c of CHAINS) {
   const registry = await pub.readContract({ address: factory, abi: factoryAbi, functionName: 'registry' });
   const tagged = (m) => log(`[${c.name}] ${m}`);
   const ledger = createLedger({ pub, factory, usdc: c.usdc, stateFile: c.stateFile, startBlock: BigInt(c.start), log: tagged });
-  const filler = createFiller({ pub, wallet, keeper, registry, wmon: c.wrapped, usdc: c.usdc, chainId: c.id, kyberChain: c.kyber, log: tagged });
+  const filler = createFiller({ pub, wallet, keeper, registry, secretOf: ledger.secretOf, wmon: c.wrapped, usdc: c.usdc, chainId: c.id, kyberChain: c.kyber, log: tagged });
   const relay = createRelay({ pub, wallet, keeper, factory, log: tagged });
-  nets.set(c.id, { ledger, relay, wallet });
+  nets.set(c.id, { ledger, relay, wallet, pub });
   tagged(`keeper ${signer ? signer.address : `${keeper} (watch-only)`} · factory ${factory} · registry ${registry}`);
 
   // One key, one nonce sequence per chain: every pass over orders waits for the previous one.
@@ -64,7 +64,26 @@ for (const c of CHAINS) {
   every(5_000, async function fill() { await tick(ledger.openOrders()); }, c.name);
 }
 
-// ── HTTP: health, points, relay, open ──
+/**
+ * POST /secret {chainId, account, id, secret}: the hidden half of a placed order (D20). Kept only if it
+ * hashes to the commitment that order holds on-chain, so nobody can fill the store with junk.
+ */
+async function keepSecret(net, { account, id, secret } = {}) {
+  let commit;
+  try {
+    const { tokenOut, destChainId, recipient, destToken, salt } = secret; // only the known fields are kept
+    const s = { tokenOut, destChainId: Number(destChainId), minOut: BigInt(secret.minOut), destMinOut: BigInt(secret.destMinOut), recipient, destToken, salt };
+    commit = commitOf(s);
+    const o = await net.pub.readContract({ address: getAddress(account), abi: accountAbi, functionName: 'order', args: [BigInt(id)] });
+    if (o.p.commit !== commit) return [400, { error: 'does not match the order' }];
+    net.ledger.remember(commit, s);
+    return [200, { ok: true }];
+  } catch {
+    return [400, { error: 'account, id and secret required' }];
+  }
+}
+
+// ── HTTP: health, points, relay, open, secret ──
 const reply = (res, status, body) => {
   res.writeHead(status, { 'content-type': 'application/json', 'access-control-allow-headers': 'content-type', vary: 'origin' });
   res.end(JSON.stringify(body));
@@ -90,13 +109,14 @@ http.createServer(async (req, res) => {
     const out = await net.relay.receipt(rcpt[2]);
     return reply(res, out.status, out.mined ? { mined: out.mined } : { error: out.error });
   }
-  if (req.method === 'POST' && (url.pathname === '/relay' || url.pathname === '/open')) {
+  if (req.method === 'POST' && (url.pathname === '/relay' || url.pathname === '/open' || url.pathname === '/secret')) {
     let body = '';
     for await (const chunk of req) { body += chunk; if (body.length > 40_000) return reply(res, 413, { error: 'too large' }); }
     let input;
     try { input = JSON.parse(body); } catch { return reply(res, 400, { error: 'json body required' }); }
     const net = netOf(input);
     if (!net) return reply(res, 400, { error: 'unsupported chain' });
+    if (url.pathname === '/secret') return reply(res, ...(await keepSecret(net, input)));
     const out = url.pathname === '/open' ? await net.relay.open(input, req.socket.remoteAddress) : await net.relay.relay(input, req.socket.remoteAddress);
     return reply(res, out.status, out.hash ? { hash: out.hash } : { error: out.error });
   }

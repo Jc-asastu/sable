@@ -38,10 +38,9 @@ contract OrderVaultsForkTest is Test {
         SableAccount.OrderParams memory p;
         p.tokenIn = address(USDC);
         p.vault = address(vault);
-        p.tokenOut = address(WMON);
         p.deadline = uint64(block.timestamp + 60 days);
         p.amountIn = 300e6;
-        p.minOut = 1;
+        p.commit = keccak256("any hidden limit");
         vm.prank(owner);
         uint256 id = account.placeOrder(p);
         assertApproxEqAbs(account.orderValue(id), 300e6, 2, "shares worth what went in");

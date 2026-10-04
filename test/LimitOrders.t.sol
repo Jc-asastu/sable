@@ -43,9 +43,11 @@ contract LimitOrdersTest is AgentOrders {
     uint32 constant SOLANA = 792703809;
     bytes32 constant SOL_WALLET = keccak256("owner's solana wallet");
     uint256 nonce;
+    /// The hidden half of the order the last helper built; fills reveal it.
+    SableAccount.Secret s;
 
     bytes32 private constant PLACE_TYPEHASH = keccak256(
-        "PlaceOrder(address tokenIn,address vault,address tokenOut,uint64 deadline,uint32 destChainId,uint128 amountIn,uint128 minOut,uint128 destMinOut,bytes32 recipient,bytes32 destToken,uint256 nonce,uint256 sigDeadline,uint64 epoch)"
+        "PlaceOrder(address tokenIn,address vault,uint64 deadline,uint128 amountIn,bytes32 commit,uint256 nonce,uint256 sigDeadline,uint64 epoch)"
     );
     bytes32 private constant CANCEL_TYPEHASH = keccak256("CancelOrder(uint256 id,uint256 nonce,uint256 deadline,uint64 epoch)");
 
@@ -81,24 +83,23 @@ contract LimitOrdersTest is AgentOrders {
 
     // ── helpers ──
 
-    function _local(uint128 amountIn, uint128 minOut) internal view returns (SableAccount.OrderParams memory p) {
-        p.tokenIn = address(usdc);
-        p.vault = address(vault);
-        p.tokenOut = address(meme);
-        p.deadline = uint64(block.timestamp + 7 days);
-        p.amountIn = amountIn;
-        p.minOut = minOut;
+    function _local(uint128 amountIn, uint128 minOut) internal returns (SableAccount.OrderParams memory) {
+        delete s;
+        (s.tokenOut, s.minOut, s.salt) = (address(meme), minOut, keccak256(abi.encode(++nonce)));
+        return _public(amountIn);
     }
 
-    function _cross(uint128 amountIn) internal view returns (SableAccount.OrderParams memory p) {
-        p.tokenIn = address(usdc);
-        p.vault = address(vault);
-        p.deadline = uint64(block.timestamp + 7 days);
-        p.destChainId = SOLANA;
-        p.amountIn = amountIn;
-        p.destMinOut = 2e9; // 2 SOL
-        p.recipient = SOL_WALLET;
-        p.destToken = bytes32(0); // native SOL
+    function _cross(uint128 amountIn) internal returns (SableAccount.OrderParams memory) {
+        delete s;
+        (s.destChainId, s.destMinOut, s.recipient) = (SOLANA, 2e9, SOL_WALLET); // 2 native SOL
+        s.salt = keccak256(abi.encode(++nonce));
+        return _public(amountIn);
+    }
+
+    /// What goes on-chain: custody fields and the commitment to `s`. Call again after editing `s`.
+    function _public(uint128 amountIn) internal view returns (SableAccount.OrderParams memory p) {
+        (p.tokenIn, p.vault, p.deadline, p.amountIn) = (address(usdc), address(vault), uint64(block.timestamp + 7 days), amountIn);
+        p.commit = keccak256(abi.encode(s));
     }
 
     function _placeAsOwner(SableAccount.OrderParams memory p) internal returns (uint256 id) {
@@ -112,9 +113,8 @@ contract LimitOrdersTest is AgentOrders {
         view
         returns (bytes memory)
     {
-        bytes memory head = abi.encode(PLACE_TYPEHASH, p.tokenIn, p.vault, p.tokenOut, p.deadline, p.destChainId);
-        bytes memory tail = abi.encode(p.amountIn, p.minOut, p.destMinOut, p.recipient, p.destToken, n, sigDeadline, epoch);
-        return _signOrder(address(account), agentKey, keccak256(bytes.concat(head, tail)));
+        bytes32 h = keccak256(abi.encode(PLACE_TYPEHASH, p.tokenIn, p.vault, p.deadline, p.amountIn, p.commit, n, sigDeadline, epoch));
+        return _signOrder(address(account), agentKey, h);
     }
 
     function _placeAsAgent(SableAccount.OrderParams memory p) internal returns (uint256) {
@@ -173,19 +173,14 @@ contract LimitOrdersTest is AgentOrders {
         vm.expectRevert(SableAccount.VaultNotAllowed.selector);
         account.placeOrder(p);
 
-        p = _local(100e6, 0); // no limit price
-        vm.prank(owner);
-        vm.expectRevert(SableAccount.BadOrder.selector);
-        account.placeOrder(p);
-
         p = _local(100e6, 1);
         p.deadline = uint64(block.timestamp);
         vm.prank(owner);
         vm.expectRevert(SableAccount.BadOrder.selector);
         account.placeOrder(p);
 
-        p = _cross(100e6);
-        p.recipient = bytes32(0);
+        p = _local(100e6, 1);
+        p.commit = bytes32(0); // no hidden half
         vm.prank(owner);
         vm.expectRevert(SableAccount.BadOrder.selector);
         account.placeOrder(p);
@@ -201,7 +196,7 @@ contract LimitOrdersTest is AgentOrders {
         uint256 id = _placeAsOwner(_local(300e6, 1_000e18));
         vault.accrue(3e6);
         vm.prank(keeper);
-        uint256 out = account.fillOrder(id, address(router), _route(300e6, 1_000e18), 0);
+        uint256 out = account.fillOrder(id, s, address(router), _route(300e6, 1_000e18), 0);
         assertEq(out, 1_000e18);
         assertEq(meme.balanceOf(address(account)), 1_000e18, "bought at the limit");
         assertApproxEqAbs(usdc.balanceOf(address(account)), 703e6, 1, "yield above amountIn stays as USDC");
@@ -214,7 +209,7 @@ contract LimitOrdersTest is AgentOrders {
         uint256 id = _placeAsOwner(_local(300e6, 1_000e18));
         vm.prank(keeper);
         vm.expectRevert(abi.encodeWithSelector(SableAccount.InsufficientOutput.selector, 999e18, 1_000e18));
-        account.fillOrder(id, address(router), _route(300e6, 999e18), 0);
+        account.fillOrder(id, s, address(router), _route(300e6, 999e18), 0);
         assertEq(account.orderValue(id), 300e6, "the order keeps waiting");
     }
 
@@ -225,7 +220,7 @@ contract LimitOrdersTest is AgentOrders {
             address who = [owner, agent, stranger][i];
             vm.prank(who);
             vm.expectRevert(SableAccount.NotAuthorized.selector);
-            account.fillOrder(id, address(router), data, 0);
+            account.fillOrder(id, s, address(router), data, 0);
         }
     }
 
@@ -233,9 +228,9 @@ contract LimitOrdersTest is AgentOrders {
         uint256 id = _placeAsOwner(_local(300e6, 1_000e18));
         vm.prank(keeper);
         vm.expectRevert(SableAccount.GasFeeTooHigh.selector);
-        account.fillOrder(id, address(router), _route(300e6, 1_200e18), 61e18); // > 5% of 1,200
+        account.fillOrder(id, s, address(router), _route(300e6, 1_200e18), 61e18); // > 5% of 1,200
         vm.prank(keeper);
-        account.fillOrder(id, address(router), _route(300e6, 1_010e18), 10e18);
+        account.fillOrder(id, s, address(router), _route(300e6, 1_010e18), 10e18);
         assertEq(meme.balanceOf(treasury), 10e18, "gas reimbursed to the treasury, not the keeper");
         assertEq(meme.balanceOf(address(account)), 1_000e18, "the limit still holds after gas");
     }
@@ -249,7 +244,7 @@ contract LimitOrdersTest is AgentOrders {
         vm.warp(block.timestamp + 8 days);
         vm.prank(keeper);
         vm.expectRevert(SableAccount.Expired.selector);
-        account.fillOrder(id, address(router), _route(300e6, 1_000e18), 0);
+        account.fillOrder(id, s, address(router), _route(300e6, 1_000e18), 0);
 
         vm.prank(keeper);
         account.cancelOrder(id);
@@ -272,18 +267,18 @@ contract LimitOrdersTest is AgentOrders {
         vault.setAvailable(100e6); // lending market fully utilised
         vm.prank(keeper);
         vm.expectRevert();
-        account.fillOrder(id, address(router), _route(300e6, 1_000e18), 0);
+        account.fillOrder(id, s, address(router), _route(300e6, 1_000e18), 0);
         assertEq(account.orderValue(id), 300e6, "still open, still earning");
         vault.setAvailable(type(uint256).max);
         vm.prank(keeper);
-        account.fillOrder(id, address(router), _route(300e6, 1_000e18), 0);
+        account.fillOrder(id, s, address(router), _route(300e6, 1_000e18), 0);
     }
 
     function test_aVaultLossSpendsWhatIsLeftAndTheLimitStillBinds() public {
         uint256 id = _placeAsOwner(_local(300e6, 900e18));
         deal(address(usdc), address(vault), 270e6); // the vault lost 10%
         vm.prank(keeper);
-        account.fillOrder(id, address(router), _route(270e6, 900e18), 0);
+        account.fillOrder(id, s, address(router), _route(270e6, 900e18), 0);
         assertEq(meme.balanceOf(address(account)), 900e18);
     }
 
@@ -306,9 +301,12 @@ contract LimitOrdersTest is AgentOrders {
     function test_agentOrdersRespectCapsAndTheShield() public {
         _expectAgentRevert(_local(501e6, 1), SableAccount.ExceedsPerTrade.selector);
 
-        SableAccount.OrderParams memory p = _local(10e6, 1);
-        p.tokenOut = address(new MockToken("RUG", 18)); // not Shield-listed
-        _expectAgentRevert(p, SableAccount.TokenNotAllowed.selector);
+        _local(10e6, 1);
+        s.tokenOut = address(new MockToken("RUG", 18)); // not Shield-listed: hidden, so it fails at the fill
+        uint256 id = _placeAsAgent(_public(10e6));
+        vm.prank(keeper);
+        vm.expectRevert(SableAccount.TokenNotAllowed.selector);
+        account.fillOrder(id, s, address(router), "", 0);
     }
 
     function test_aRotatedKeyCantPlaceOrders() public {
@@ -326,7 +324,10 @@ contract LimitOrdersTest is AgentOrders {
     // ── cross-chain fills (SOL on Solana) ──
 
     function test_agentCrossOrdersOnlyPayTheOwnerApprovedRecipient() public {
-        _expectAgentRevert(_cross(300e6), SableAccount.NotAuthorized.selector); // no approved recipient yet
+        uint256 id = _placeAsAgent(_cross(300e6));
+        vm.prank(keeper);
+        vm.expectRevert(SableAccount.NotAuthorized.selector); // no approved recipient yet
+        account.fillCrossOrder(id, s, bytes32(0), 0);
 
         vm.prank(stranger);
         vm.expectRevert(SableAccount.NotOwner.selector);
@@ -334,12 +335,54 @@ contract LimitOrdersTest is AgentOrders {
 
         vm.prank(owner);
         account.setCrossRecipient(SOLANA, SOL_WALLET);
-        SableAccount.OrderParams memory p = _cross(300e6);
-        p.recipient = keccak256("attacker");
-        _expectAgentRevert(p, SableAccount.NotAuthorized.selector);
+        _cross(300e6);
+        s.recipient = keccak256("attacker");
+        uint256 bad = _placeAsAgent(_public(300e6));
+        vm.prank(keeper);
+        vm.expectRevert(SableAccount.NotAuthorized.selector);
+        account.fillCrossOrder(bad, s, bytes32(0), 0);
 
-        uint256 id = _placeAsAgent(_cross(300e6));
-        assertEq(account.orderValue(id), 300e6);
+        _cross(300e6);
+        uint256 good = _placeAsAgent(_public(300e6));
+        vm.prank(keeper);
+        account.fillCrossOrder(good, s, bytes32(0), 0);
+        assertEq(account.orderValue(good), 0, "filled to the approved wallet");
+    }
+
+    // ── hidden orders (D20) ──
+
+    function test_theChainNeverShowsTheLimitUntilTheFill() public {
+        uint256 id = _placeAsOwner(_local(300e6, 1_000e18));
+        SableAccount.LimitOrder memory o = account.order(id);
+        assertEq(o.p.commit, keccak256(abi.encode(s)), "only the commitment is stored");
+        assertEq(o.p.amountIn, 300e6);
+    }
+
+    function test_aWrongRevealCantFillAndTheOwnerStillGetsTheFundsBack() public {
+        uint256 id = _placeAsOwner(_local(300e6, 1_000e18));
+        SableAccount.Secret memory lie = s;
+        lie.minOut = 1; // a keeper trying a worse limit
+        vm.prank(keeper);
+        vm.expectRevert(SableAccount.BadOrder.selector);
+        account.fillOrder(id, lie, address(router), _route(300e6, 1), 0);
+
+        lie = s;
+        lie.salt = bytes32(0);
+        vm.prank(keeper);
+        vm.expectRevert(SableAccount.BadOrder.selector);
+        account.fillOrder(id, lie, address(router), _route(300e6, 1_000e18), 0);
+
+        vm.prank(owner);
+        account.cancelOrder(id); // no secret needed to get out
+        assertEq(usdc.balanceOf(address(account)), 1_000e6);
+    }
+
+    function test_aMalformedSecretIsRefusedAtTheFill() public {
+        _local(300e6, 0); // no limit price
+        uint256 id = _placeAsOwner(_public(300e6));
+        vm.prank(keeper);
+        vm.expectRevert(SableAccount.BadOrder.selector);
+        account.fillOrder(id, s, address(router), _route(300e6, 1), 0);
     }
 
     function test_keeperFillsCrossOrdersThroughTheDepository() public {
@@ -348,7 +391,7 @@ contract LimitOrdersTest is AgentOrders {
         bytes32 depositId = keccak256("relay request");
         uint256 fee = 300e6 * 30 / 10_000;
         vm.prank(keeper);
-        account.fillCrossOrder(id, depositId, 1e6);
+        account.fillCrossOrder(id, s, depositId, 1e6);
         assertEq(depository.amount(), 300e6 - fee - 1e6, "pays the solver what's left after fee and gas");
         assertEq(depository.depositor(), address(account));
         assertEq(depository.token(), address(usdc));
@@ -362,20 +405,20 @@ contract LimitOrdersTest is AgentOrders {
         uint256 id = _placeAsOwner(_cross(300e6));
         vm.prank(owner);
         vm.expectRevert(SableAccount.NotAuthorized.selector);
-        account.fillCrossOrder(id, bytes32(0), 0);
+        account.fillCrossOrder(id, s, bytes32(0), 0);
 
         vm.prank(keeper);
         vm.expectRevert(SableAccount.GasFeeTooHigh.selector);
-        account.fillCrossOrder(id, bytes32(0), 20e6); // > 5%
+        account.fillCrossOrder(id, s, bytes32(0), 20e6); // > 5%
 
         vm.prank(keeper);
         vm.expectRevert(SableAccount.BadOrder.selector);
-        account.fillOrder(id, address(router), "", 0); // a cross order can't be filled locally
+        account.fillOrder(id, s, address(router), "", 0); // a cross order can't be filled locally
 
         registry.setRelayDepository(address(0));
         vm.prank(keeper);
         vm.expectRevert(SableAccount.NoDepository.selector);
-        account.fillCrossOrder(id, bytes32(0), 0);
+        account.fillCrossOrder(id, s, bytes32(0), 0);
     }
 
     function test_monSentBeforeTheAccountExistsIsWrappedOnCreation() public {

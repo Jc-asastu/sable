@@ -22,8 +22,8 @@ test('ledger discovers accounts and orders, and a fill earns D18 points', async 
   const t0 = 1_800_000_000;
   const events = [
     { block: 10n, address: FACTORY, eventName: 'AccountCreated', args: { owner: OWNER, account: ACCOUNT } },
-    { block: 20n, address: ACCOUNT, eventName: 'OrderPlaced', args: { id: 1n, tokenIn: USDC, vault: A(1), amountIn: 1_000_000_000n, destChainId: 0 } },
-    { block: 30n, address: ACCOUNT, eventName: 'OrderPlaced', args: { id: 2n, tokenIn: USDC, vault: A(1), amountIn: 1_000_000_000n, destChainId: 0 } },
+    { block: 20n, address: ACCOUNT, eventName: 'OrderPlaced', args: { id: 1n, tokenIn: USDC, vault: A(1), amountIn: 1_000_000_000n, commit: pad('0x01') } },
+    { block: 30n, address: ACCOUNT, eventName: 'OrderPlaced', args: { id: 2n, tokenIn: USDC, vault: A(1), amountIn: 1_000_000_000n, commit: pad('0x02') } },
     { block: 230n, address: ACCOUNT, eventName: 'OrderFilled', args: { id: 2n, spent: 1_000_000_000n, amountOut: 1n, yieldKept: 0n } },
   ];
   const time = { 20n: t0, 30n: t0 + 2 * DAY, 230n: t0 + 2 * DAY };
@@ -51,7 +51,8 @@ test('ledger discovers accounts and orders, and a fill earns D18 points', async 
 
 // ── filler ──
 
-function fillerHarness({ order, value, kyberOut, relayOut, depositOverride, wallet = true }) {
+// `order` is both halves in one object: the chain returns it as `p`, the secret store returns it as the secret.
+function fillerHarness({ order, value, kyberOut, relayOut, depositOverride, wallet = true, secret = order }) {
   const sent = [], logs = [];
   const pub = {
     readContract: async ({ functionName }) => ({
@@ -76,7 +77,7 @@ function fillerHarness({ order, value, kyberOut, relayOut, depositOverride, wall
     throw new Error('unexpected ' + url);
   };
   const filler = createFiller({ pub, wallet: wallet ? { writeContract: async (r) => { sent.push(r); return '0xhash'; } } : null,
-    keeper: KEEPER, registry: REGISTRY, wmon: WMON, usdc: USDC, log: (m) => logs.push(m) });
+    keeper: KEEPER, registry: REGISTRY, wmon: WMON, usdc: USDC, secretOf: () => secret, log: (m) => logs.push(m) });
   return { filler, sent, logs };
 }
 const local = (minOut) => ({ tokenIn: USDC, vault: A(1), tokenOut: MEME, deadline: 9_999_999_999n, destChainId: 0, amountIn: 300_000_000n, minOut, destMinOut: 0n, recipient: pad('0x00'), destToken: pad('0x00') });
@@ -92,7 +93,8 @@ test('a local order waits below its limit and fills at it, paying gas in the bou
   await at.filler.tick(open);
   assert.equal(at.sent.length, 1);
   assert.equal(at.sent[0].functionName, 'fillOrder');
-  const [, router, data, gasFee] = at.sent[0].args;
+  const [, revealed, router, data, gasFee] = at.sent[0].args;
+  assert.equal(revealed.minOut, 1_000n * 10n ** 18n, 'the fill reveals the hidden limit');
   assert.equal(router, A(0x60));
   assert.equal(data, '0xdeadbeef');
   assert.ok(gasFee > 0n && gasFee < 10n ** 18n, 'about $0.002 of gas, in MEME units');
@@ -107,7 +109,7 @@ test('a cross-chain order fills only when Relay quotes its minimum, with the exa
   await ok.filler.tick(open);
   assert.equal(ok.sent.length, 1);
   assert.equal(ok.sent[0].functionName, 'fillCrossOrder');
-  assert.equal(ok.sent[0].args[1], pad('0x01'), "Relay's deposit id");
+  assert.equal(ok.sent[0].args[2], pad('0x01'), "Relay's deposit id");
 
   const tampered = fillerHarness({ order: cross(2_500_000_000n), value: 300_000_000n, relayOut: 2_527_000_000n, depositOverride: 1n });
   await tampered.filler.tick(open);
@@ -124,6 +126,19 @@ test('expired orders are returned to the account, and watch-only mode sends noth
   await watch.filler.tick(open);
   assert.equal(watch.sent.length, 0);
   assert.match(watch.logs.join('\n'), /watch-only.*fillOrder/);
+});
+
+test('an order whose hidden half the keeper never got is left alone', async () => {
+  const h = fillerHarness({ order: local(1n), value: 300_000_000n, kyberOut: 10n ** 18n, secret: null });
+  await h.filler.tick(open);
+  assert.equal(h.sent.length, 0);
+});
+
+test('commitOf matches Solidity keccak256(abi.encode(Secret))', async () => {
+  const { commitOf } = await import('../src/chain.js');
+  const s = { tokenOut: MEME, destChainId: 0, minOut: 1000n, destMinOut: 0n, recipient: pad('0x00'), destToken: pad('0x00'), salt: pad('0x05') };
+  // cast keccak $(cast abi-encode "f((address,uint32,uint128,uint128,bytes32,bytes32,bytes32))" "(0x...111,0,1000,0,0x00..,0x00..,0x00..05)")
+  assert.equal(commitOf(s), '0x6dbec56f3ee741e689a3b36e4d8481f1489ceca62d597a2cd69aa87c7459a1ee');
 });
 
 // ── relay ──
