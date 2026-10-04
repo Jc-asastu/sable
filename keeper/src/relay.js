@@ -68,15 +68,20 @@ export function createRelay({ pub, wallet, keeper, factory, log = console.log })
       const hash = await wallet.sendTransaction({ to: account, data, gas });
       const t2 = Date.now();
       log(`relayed ${fn} for ${account}: ${hash}`);
-      // The keeper sits next to the RPC: it waits for the receipt (50ms polls) so the browser does not
-      // have to poll from far away. On timeout the browser still waits on its own.
-      const receipt = await pub.waitForTransactionReceipt?.({ hash, pollingInterval: 50, timeout: 8_000 }).catch(() => null);
-      log(`timing ${fn}: estimate ${t1 - t0}ms · send ${t2 - t1}ms · receipt ${Date.now() - t2}ms`);
-      return receipt ? { status: 200, hash, mined: receipt.status } : { status: 200, hash };
+      log(`timing ${fn}: estimate ${t1 - t0}ms · send ${t2 - t1}ms`);
+      // Answer as soon as it is sent: the browser shows "sent" and asks GET /receipt for the outcome.
+      return { status: 200, hash };
     } catch (e) {
       return { status: 422, error: e.shortMessage ?? 'the call would revert' };
     }
   }
 
-  return { relay, open };
+  /** Waits for a receipt next to the RPC (50ms polls): far faster than a browser polling from afar. */
+  async function receipt(hash) {
+    if (!/^0x[\da-fA-F]{64}$/.test(hash)) return { status: 400, error: 'transaction hash required' };
+    const r = await pub.waitForTransactionReceipt({ hash, pollingInterval: 50, timeout: 10_000 }).catch(() => null);
+    return r ? { status: 200, mined: r.status } : { status: 404, error: 'not mined yet' };
+  }
+
+  return { relay, open, receipt };
 }

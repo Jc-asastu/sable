@@ -83,6 +83,13 @@ http.createServer(async (req, res) => {
     const all = [...nets.values()].map((n) => n.ledger.pointsOf(points[1]));
     return reply(res, 200, { points: all.reduce((a, p) => a + p.points, 0), multiplier: Math.max(...all.map((p) => p.multiplier)) });
   }
+  const rcpt = url.pathname.match(/^\/receipt\/(\d+)\/(0x[0-9a-fA-F]{64})$/);
+  if (req.method === 'GET' && rcpt) {
+    const net = nets.get(Number(rcpt[1]));
+    if (!net) return reply(res, 400, { error: 'unsupported chain' });
+    const out = await net.relay.receipt(rcpt[2]);
+    return reply(res, out.status, out.mined ? { mined: out.mined } : { error: out.error });
+  }
   if (req.method === 'POST' && (url.pathname === '/relay' || url.pathname === '/open')) {
     let body = '';
     for await (const chunk of req) { body += chunk; if (body.length > 40_000) return reply(res, 413, { error: 'too large' }); }
@@ -91,7 +98,7 @@ http.createServer(async (req, res) => {
     const net = netOf(input);
     if (!net) return reply(res, 400, { error: 'unsupported chain' });
     const out = url.pathname === '/open' ? await net.relay.open(input, req.socket.remoteAddress) : await net.relay.relay(input, req.socket.remoteAddress);
-    return reply(res, out.status, out.hash ? { hash: out.hash, mined: out.mined } : { error: out.error });
+    return reply(res, out.status, out.hash ? { hash: out.hash } : { error: out.error });
   }
   reply(res, 404, { error: 'not found' });
 }).listen(Number(env.PORT || 8080), () => log(`listening on :${env.PORT || 8080}`));
