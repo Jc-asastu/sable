@@ -91,7 +91,7 @@ http.createServer(async (req, res) => {
     const net = netOf(input);
     if (!net) return reply(res, 400, { error: 'unsupported chain' });
     const out = url.pathname === '/open' ? await net.relay.open(input, req.socket.remoteAddress) : await net.relay.relay(input, req.socket.remoteAddress);
-    return reply(res, out.status, out.hash ? { hash: out.hash } : { error: out.error });
+    return reply(res, out.status, out.hash ? { hash: out.hash, mined: out.mined } : { error: out.error });
   }
   reply(res, 404, { error: 'not found' });
 }).listen(Number(env.PORT || 8080), () => log(`listening on :${env.PORT || 8080}`));

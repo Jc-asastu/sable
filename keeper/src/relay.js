@@ -65,7 +65,10 @@ export function createRelay({ pub, wallet, keeper, factory, log = console.log })
       const gas = (await pub.estimateGas({ account: keeper, to: account, data })) * 12n / 10n; // reverts here cost nothing
       const hash = await wallet.sendTransaction({ to: account, data, gas });
       log(`relayed ${fn} for ${account}: ${hash}`);
-      return { status: 200, hash };
+      // The keeper sits next to the RPC: it waits for the receipt (50ms polls) so the browser does not
+      // have to poll from far away. On timeout the browser still waits on its own.
+      const receipt = await pub.waitForTransactionReceipt?.({ hash, pollingInterval: 50, timeout: 8_000 }).catch(() => null);
+      return receipt ? { status: 200, hash, mined: receipt.status } : { status: 200, hash };
     } catch (e) {
       return { status: 422, error: e.shortMessage ?? 'the call would revert' };
     }
