@@ -54,11 +54,29 @@ A trade pays its fee in whatever it sells: USDC, MON, a memecoin.
 - The swap has to deliver at least an oracle-free floor: the quote minus 1%, checked on-chain like any agent swap.
 - Accrual is therefore a little "lumpy" for non-USDC fees. The UI interpolates between deposits using the last 24h rate.
 
-### Orders not in USDC
+### Every order earns, weighted by what it was worth when placed
 
-An order whose `tokenIn` is not a stablecoin (ETH, MON, a memecoin) needs a USD weight. There is no oracle by design, so v5 takes the simplest correct option: **only USDC/USDT orders earn cSABLE weight.** Other orders still earn their vault APR and placement points.
+Every order earns cSABLE: USDC, ETH, MON or a memecoin. Its weight is **its USD value at placement, fixed for the order's life**.
 
-Weighting them by price is v6, once a price source is chosen. The ticket says so: "cSABLE rewards: USDC and USDT orders".
+- A bag worth $2k when placed keeps farming as $2k even if it drops to $1k.
+- The holder is already at a loss and has money locked in a vault. Sable does not punish them twice (Juan, 2026-10-05).
+
+**Who sets the value:** the keeper, never the page, because the owner controls the page and the agent key.
+
+1. A new order opens with **weight 0**. USDC and USDT are the exception: their weight is set on-chain at 1:1 immediately.
+2. The keeper values the order and calls `setWeight(account, id, usd)`. Only a registered keeper can, and only once per order.
+   - It quotes on Kyber the USDC that **selling the whole `amountIn`** would return, so price impact is included.
+   - It does this twice, about 5 minutes apart, and takes **the lower** quote.
+3. Accrual starts from `setWeight`. There is no backdating, so the minutes before it earn nothing.
+
+**Why this resists manipulation:**
+- **Pumping a thin pool before placing doesn't pay.** The valuation is the *sale* quote of the full bag, which collapses on a thin pool.
+- **A pump has to last** across two quotes about 5 minutes apart.
+- **One token can't dominate:** weight per token is capped at a share of its pool liquidity (`maxWeightBps`, registry setting, 10% by default).
+
+**Trust:** the keeper already decides when to fill, inside the limit the contract enforces. Valuing is the same trust level, and its worst case is mis-weighting the reward pool. It can never touch an order's funds.
+
+The weight is recorded and the pool tracks it, so the UI shows each order's cSABLE as `weight` (USD at placement). It never needs a live price.
 
 ## What the user sees
 
