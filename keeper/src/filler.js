@@ -17,7 +17,7 @@ async function json(url, options) {
  * `send(request)` returns a tx hash and waits for its receipt.
  */
 /** `secretOf(commit)` returns an order's hidden half, or nothing if the keeper never got it. */
-export function createFiller({ pub, wallet, keeper, registry, wmon, usdc, secretOf, chainId = 143, kyberChain = 'monad', log = console.log }) {
+export function createFiller({ pub, wallet, keeper, registry, wmon, usdc, secretOf, crossFills = false, chainId = 143, kyberChain = 'monad', log = console.log }) {
   const KYBER = `https://aggregator-api.kyberswap.com/${kyberChain}/api/v1`;
   let monUsd = 0, monUsdAt = 0;
 
@@ -95,7 +95,8 @@ export function createFiller({ pub, wallet, keeper, registry, wmon, usdc, secret
         const value = await pub.readContract({ address: o.account, abi: accountAbi, functionName: 'orderValue', args: [id] });
         const spend = value < p.amountIn ? value : p.amountIn;
         if (s.destChainId === 0) await fillLocal(o.account, id, p, s, spend, BigInt(feeBps));
-        else await fillCross(o.account, id, p, s, spend, BigInt(feeBps));
+        // Cross fills trust the keeper with the Relay request (audit C-1): off until Across replaces it.
+        else if (crossFills) await fillCross(o.account, id, p, s, spend, BigInt(feeBps));
       } catch (e) {
         log(`order ${o.account}#${o.id}: ${e.shortMessage ?? e.message}`);
       }

@@ -45,7 +45,7 @@ for (const c of CHAINS) {
   const registry = await pub.readContract({ address: factory, abi: factoryAbi, functionName: 'registry' });
   const tagged = (m) => log(`[${c.name}] ${m}`);
   const ledger = createLedger({ pub, factory, usdc: c.usdc, stateFile: c.stateFile, startBlock: BigInt(c.start), log: tagged });
-  const filler = createFiller({ pub, wallet, keeper, registry, secretOf: ledger.secretOf, wmon: c.wrapped, usdc: c.usdc, chainId: c.id, kyberChain: c.kyber, log: tagged });
+  const filler = createFiller({ pub, wallet, keeper, registry, secretOf: ledger.secretOf, crossFills: env.CROSS_FILLS === 'on', wmon: c.wrapped, usdc: c.usdc, chainId: c.id, kyberChain: c.kyber, log: tagged });
   const relay = createRelay({ pub, wallet, keeper, factory, log: tagged });
   nets.set(c.id, { ledger, relay, wallet, pub });
   tagged(`keeper ${signer ? signer.address : `${keeper} (watch-only)`} · factory ${factory} · registry ${registry}`);

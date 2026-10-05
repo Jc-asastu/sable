@@ -52,7 +52,7 @@ test('ledger discovers accounts and orders, and a fill earns D18 points', async 
 // ── filler ──
 
 // `order` is both halves in one object: the chain returns it as `p`, the secret store returns it as the secret.
-function fillerHarness({ order, value, kyberOut, relayOut, depositOverride, wallet = true, secret = order }) {
+function fillerHarness({ order, value, kyberOut, relayOut, depositOverride, wallet = true, secret = order, crossFills = true }) {
   const sent = [], logs = [];
   const pub = {
     readContract: async ({ functionName }) => ({
@@ -79,7 +79,7 @@ function fillerHarness({ order, value, kyberOut, relayOut, depositOverride, wall
     throw new Error('unexpected ' + url);
   };
   const filler = createFiller({ pub, wallet: wallet ? { writeContract: async (r) => { sent.push(r); return '0xhash'; } } : null,
-    keeper: KEEPER, registry: REGISTRY, wmon: WMON, usdc: USDC, secretOf: () => secret, log: (m) => logs.push(m) });
+    keeper: KEEPER, registry: REGISTRY, wmon: WMON, usdc: USDC, secretOf: () => secret, crossFills, log: (m) => logs.push(m) });
   return { filler, sent, logs };
 }
 const local = (minOut) => ({ tokenIn: USDC, vault: A(1), tokenOut: MEME, deadline: 9_999_999_999n, destChainId: 0, amountIn: 300_000_000n, minOut, destMinOut: 0n, recipient: pad('0x00'), destToken: pad('0x00') });
@@ -207,4 +207,10 @@ test('the sender hands out nonces in order, asks the chain only at start and aft
   fail = false;
   await s.sendTransaction({ to: ACCOUNT, data: '0x04', gas: 1n });
   assert.equal(asked, 2, 'resynced after the failure');
+});
+
+test('cross-chain fills stay off unless CROSS_FILLS turns them on (audit C-1)', async () => {
+  const off = fillerHarness({ order: cross(2_500_000_000n), value: 300_000_000n, relayOut: 2_527_000_000n, crossFills: false });
+  await off.filler.tick(open);
+  assert.equal(off.sent.length, 0);
 });
