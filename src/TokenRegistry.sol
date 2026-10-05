@@ -36,10 +36,34 @@ contract TokenRegistry is Ownable2Step {
     event VaultSet(address indexed vault, bool allowed);
     event KeeperSet(address indexed keeper, bool allowed);
     event AcrossSpokePoolSet(address indexed pool);
+    event GuardianSet(address indexed guardian);
+    event Paused(bool newOrders, bool crossFills);
+    event OrderBoundsSet(address indexed token, uint128 minAmount, uint128 maxCross);
 
     error LengthMismatch();
     error ZeroCap();
     error FeeTooHigh();
+    error NotGuardian();
+
+    /// Can only reduce risk, and does so at once: revoke keepers, delist tokens, disallow vaults,
+    /// pause new orders or cross-chain fills. Everything that adds risk stays with the (timelocked) owner.
+    address public guardian;
+    bool public newOrdersPaused;
+    bool public crossFillsPaused;
+
+    /// Per input token: the smallest order (keeps dust from flooding the keeper) and the largest
+    /// cross-chain order (bounds what one cross fill can move). Zero means no bound.
+    struct OrderBounds {
+        uint128 minAmount;
+        uint128 maxCross;
+    }
+
+    mapping(address => OrderBounds) public orderBounds;
+
+    modifier onlyOwnerOrGuardian() {
+        if (msg.sender != owner() && msg.sender != guardian) revert NotGuardian();
+        _;
+    }
 
     constructor(address curator) Ownable(curator) {}
 
@@ -55,7 +79,7 @@ contract TokenRegistry is Ownable2Step {
         }
     }
 
-    function delist(address[] calldata tokens) external onlyOwner {
+    function delist(address[] calldata tokens) external onlyOwnerOrGuardian {
         for (uint256 i; i < tokens.length; i++) {
             delete listingOf[tokens[i]];
             emit Delisted(tokens[i]);
@@ -76,6 +100,37 @@ contract TokenRegistry is Ownable2Step {
     function setKeeper(address keeper, bool allowed) external onlyOwner {
         isKeeper[keeper] = allowed;
         emit KeeperSet(keeper, allowed);
+    }
+
+    // ── guardian: instant, risk-reducing only ──
+
+    function setGuardian(address guardian_) external onlyOwner {
+        guardian = guardian_;
+        emit GuardianSet(guardian_);
+    }
+
+    function revokeKeeper(address keeper) external onlyOwnerOrGuardian {
+        isKeeper[keeper] = false;
+        emit KeeperSet(keeper, false);
+    }
+
+    function disallowVault(address vault) external onlyOwnerOrGuardian {
+        vaultAllowed[vault] = false;
+        emit VaultSet(vault, false);
+    }
+
+    /// The guardian may only switch pauses on; switching them off is the owner's.
+    function setPaused(bool newOrders, bool crossFills) external onlyOwnerOrGuardian {
+        if (msg.sender != owner() && ((newOrdersPaused && !newOrders) || (crossFillsPaused && !crossFills))) {
+            revert NotGuardian();
+        }
+        (newOrdersPaused, crossFillsPaused) = (newOrders, crossFills);
+        emit Paused(newOrders, crossFills);
+    }
+
+    function setOrderBounds(address token, uint128 minAmount, uint128 maxCross) external onlyOwner {
+        orderBounds[token] = OrderBounds(minAmount, maxCross);
+        emit OrderBoundsSet(token, minAmount, maxCross);
     }
 
     function setAcrossSpokePool(address pool) external onlyOwner {

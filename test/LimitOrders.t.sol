@@ -63,9 +63,9 @@ contract LimitOrdersTest is AgentOrders {
     SableAccount.Secret s;
 
     bytes32 private constant PLACE_TYPEHASH = keccak256(
-        "PlaceOrder(address tokenIn,address vault,uint64 deadline,uint128 amountIn,bytes32 commit,uint256 nonce,uint256 sigDeadline,uint64 epoch)"
+        "PlaceOrder(address tokenIn,address vault,uint64 deadline,uint128 amountIn,bytes32 commit,uint256 gasFee,uint256 nonce,uint256 sigDeadline,uint64 epoch)"
     );
-    bytes32 private constant CANCEL_TYPEHASH = keccak256("CancelOrder(uint256 id,uint256 nonce,uint256 deadline,uint64 epoch)");
+    bytes32 private constant CANCEL_TYPEHASH = keccak256("CancelOrder(uint256 id,uint256 gasFee,uint256 nonce,uint256 deadline,uint64 epoch)");
 
     function setUp() public {
         vm.warp(1_800_000_000);
@@ -123,20 +123,23 @@ contract LimitOrdersTest is AgentOrders {
         id = account.placeOrder(p);
     }
 
+    /// The relay gas fee the next agent placement signs (0 unless a test sets it).
+    uint256 placeGas;
+
     /// EIP-712 encodeData written out field by field, independent of the contract's abi.encode(struct).
     function _signPlace(SableAccount.OrderParams memory p, uint256 n, uint256 sigDeadline, uint64 epoch)
         internal
         view
         returns (bytes memory)
     {
-        bytes32 h = keccak256(abi.encode(PLACE_TYPEHASH, p.tokenIn, p.vault, p.deadline, p.amountIn, p.commit, n, sigDeadline, epoch));
+        bytes32 h = keccak256(abi.encode(PLACE_TYPEHASH, p.tokenIn, p.vault, p.deadline, p.amountIn, p.commit, placeGas, n, sigDeadline, epoch));
         return _signOrder(address(account), agentKey, h);
     }
 
     function _placeAsAgent(SableAccount.OrderParams memory p) internal returns (uint256) {
         (uint256 n, uint256 sigDeadline, uint64 epoch, bytes memory sig) = _signed(p);
         vm.prank(stranger); // anyone relays it
-        return account.placeOrderWithSig(p, n, sigDeadline, epoch, sig);
+        return account.placeOrderWithSig(p, placeGas, n, sigDeadline, epoch, sig);
     }
 
     /// Signs first, so a test can expectRevert on the placement call itself.
@@ -148,7 +151,7 @@ contract LimitOrdersTest is AgentOrders {
     function _expectAgentRevert(SableAccount.OrderParams memory p, bytes4 err) internal {
         (uint256 n, uint256 dl, uint64 epoch, bytes memory sig) = _signed(p);
         vm.expectRevert(err);
-        account.placeOrderWithSig(p, n, dl, epoch, sig);
+        account.placeOrderWithSig(p, placeGas, n, dl, epoch, sig);
     }
 
     function _route(uint256 spend, uint256 out) internal view returns (bytes memory) {
@@ -308,9 +311,9 @@ contract LimitOrdersTest is AgentOrders {
         uint256 n = ++nonce;
         uint256 dl = block.timestamp + 1 hours;
         uint64 epoch = account.agentEpoch();
-        bytes memory sig = _signOrder(address(account), agentKey, keccak256(abi.encode(CANCEL_TYPEHASH, id, n, dl, epoch)));
+        bytes memory sig = _signOrder(address(account), agentKey, keccak256(abi.encode(CANCEL_TYPEHASH, id, uint256(0), n, dl, epoch)));
         vm.prank(stranger);
-        account.cancelOrderWithSig(id, n, dl, epoch, sig);
+        account.cancelOrderWithSig(id, 0, n, dl, epoch, sig);
         assertEq(usdc.balanceOf(address(account)), 1_000e6);
     }
 
@@ -334,7 +337,7 @@ contract LimitOrdersTest is AgentOrders {
         vm.prank(owner);
         account.setAgent(agent); // same key, new epoch
         vm.expectRevert(SableAccount.NotAuthorized.selector);
-        account.placeOrderWithSig(p, n, dl, epoch, sig);
+        account.placeOrderWithSig(p, placeGas, n, dl, epoch, sig);
     }
 
     // ── cross-chain fills (SOL on Solana) ──
@@ -445,6 +448,80 @@ contract LimitOrdersTest is AgentOrders {
         vm.prank(keeper);
         vm.expectRevert(SableAccount.NoSpokePool.selector);
         account.fillCrossOrder(id, s, 2e9, uint32(block.timestamp), 0);
+    }
+
+    // ── v5 safety controls (audit C-2, H-2, M-1) ──
+
+    function test_theGuardianCanOnlyReduceRiskAndActsAtOnce() public {
+        address guardian = makeAddr("guardian");
+        registry.setGuardian(guardian);
+        uint256 id = _placeAsOwner(_local(300e6, 1_000e18));
+
+        vm.startPrank(guardian);
+        registry.revokeKeeper(keeper);
+        registry.setPaused(true, true);
+        registry.disallowVault(address(vault));
+        vm.expectRevert(TokenRegistry.NotGuardian.selector);
+        registry.setPaused(false, true); // can't lift a pause
+        vm.expectRevert();
+        registry.setKeeper(guardian, true); // can't add a keeper
+        vm.expectRevert();
+        registry.setVault(address(vault), true); // can't allow a vault
+        vm.stopPrank();
+
+        vm.prank(keeper);
+        vm.expectRevert(SableAccount.NotAuthorized.selector);
+        account.fillOrder(id, s, address(router), _route(300e6, 1_000e18), 0);
+        vm.prank(owner);
+        vm.expectRevert(SableAccount.Paused.selector);
+        account.placeOrder(_local(10e6, 1));
+        vm.prank(owner);
+        account.cancelOrder(id); // owners always get their money back
+        assertEq(usdc.balanceOf(address(account)), 1_000e6);
+
+        vm.prank(stranger);
+        vm.expectRevert(TokenRegistry.NotGuardian.selector);
+        registry.revokeKeeper(keeper);
+    }
+
+    function test_pausedCrossFillsWaitAndTooLargeCrossOrdersCantFill() public {
+        uint256 id = _placeAsOwner(_cross(300e6));
+        registry.setPaused(false, true);
+        vm.prank(keeper);
+        vm.expectRevert(SableAccount.Paused.selector);
+        account.fillCrossOrder(id, s, 2e9, uint32(block.timestamp), 0);
+
+        registry.setPaused(false, false);
+        registry.setOrderBounds(address(usdc), 0, 100e6);
+        vm.prank(keeper);
+        vm.expectRevert(SableAccount.CrossTooLarge.selector);
+        account.fillCrossOrder(id, s, 2e9, uint32(block.timestamp), 0);
+    }
+
+    function test_dustOrdersAreRefused() public {
+        registry.setOrderBounds(address(usdc), 1e6, 0);
+        vm.prank(owner);
+        vm.expectRevert(SableAccount.OrderTooSmall.selector);
+        account.placeOrder(_local(0.5e6, 1));
+        _placeAsOwner(_local(1e6, 1));
+    }
+
+    function test_agentPlacementAndCancelRepayTheRelayerCapped() public {
+        placeGas = 0.1e6;
+        uint256 id = _placeAsAgent(_local(300e6, 1_000e18));
+        assertEq(usdc.balanceOf(treasury), 0.1e6, "placement repaid the relayer");
+        assertEq(account.orderValue(id), 300e6, "the order keeps its full amount");
+
+        placeGas = 16e6; // > 5% of 300
+        _expectAgentRevert(_local(300e6, 1_000e18), SableAccount.GasFeeTooHigh.selector);
+
+        uint256 n = ++nonce;
+        uint256 dl = block.timestamp + 1 hours;
+        uint64 epoch = account.agentEpoch();
+        bytes memory sig = _signOrder(address(account), agentKey, keccak256(abi.encode(CANCEL_TYPEHASH, id, uint256(0.2e6), n, dl, epoch)));
+        vm.prank(stranger);
+        account.cancelOrderWithSig(id, 0.2e6, n, dl, epoch, sig);
+        assertEq(usdc.balanceOf(treasury), 0.3e6, "the cancel repaid it too");
     }
 
     function test_monSentBeforeTheAccountExistsIsWrappedOnCreation() public {

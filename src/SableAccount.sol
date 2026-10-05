@@ -116,10 +116,10 @@ contract SableAccount is Initializable, ReentrancyGuard, EIP712 {
     }
 
     bytes32 private constant PLACE_TYPEHASH = keccak256(
-        "PlaceOrder(address tokenIn,address vault,uint64 deadline,uint128 amountIn,bytes32 commit,uint256 nonce,uint256 sigDeadline,uint64 epoch)"
+        "PlaceOrder(address tokenIn,address vault,uint64 deadline,uint128 amountIn,bytes32 commit,uint256 gasFee,uint256 nonce,uint256 sigDeadline,uint64 epoch)"
     );
     bytes32 private constant CANCEL_TYPEHASH =
-        keccak256("CancelOrder(uint256 id,uint256 nonce,uint256 deadline,uint64 epoch)");
+        keccak256("CancelOrder(uint256 id,uint256 gasFee,uint256 nonce,uint256 deadline,uint64 epoch)");
 
     bytes32 private constant SWAP_TYPEHASH = keccak256(
         "SwapOrder(address router,address tokenIn,uint256 amountIn,address tokenOut,uint256 minOut,uint256 gasFee,uint256 nonce,uint256 deadline,uint64 epoch,bytes32 dataHash)"
@@ -192,6 +192,9 @@ contract SableAccount is Initializable, ReentrancyGuard, EIP712 {
     error BadOrder();
     error VaultNotAllowed();
     error NoSpokePool();
+    error Paused();
+    error OrderTooSmall();
+    error CrossTooLarge();
 
     modifier onlyOwner() {
         if (msg.sender != owner) revert NotOwner();
@@ -373,21 +376,28 @@ contract SableAccount is Initializable, ReentrancyGuard, EIP712 {
 
     /// @notice An order the agent signed, relayed by anyone. Agent caps apply to `amountIn` now; the
     /// Shield listing of what it buys, or the owner-approved recipient, is checked when it fills.
+    /// `gasFee` (in `tokenIn`, from the account's balance, capped like swaps) repays the relayer, so
+    /// relaying can't be abused for free (audit H-2).
     function placeOrderWithSig(
         OrderParams calldata p,
+        uint256 gasFee,
         uint256 nonce,
         uint256 sigDeadline,
         uint64 epoch,
         bytes calldata sig
     ) external nonReentrant returns (uint256) {
         // All OrderParams fields are static, so abi.encode lays them out exactly as EIP-712 encodeData.
-        _useAgentSig(keccak256(abi.encode(PLACE_TYPEHASH, p, nonce, sigDeadline, epoch)), nonce, sigDeadline, epoch, sig);
+        _useAgentSig(keccak256(abi.encode(PLACE_TYPEHASH, p, gasFee, nonce, sigDeadline, epoch)), nonce, sigDeadline, epoch, sig);
         _checkAgent(p.tokenIn, p.amountIn, p.tokenIn);
+        if (gasFee != 0) _payGas(p.tokenIn, gasFee, p.amountIn);
         return _place(p, true);
     }
 
     function _place(OrderParams calldata p, bool byAgent) private returns (uint256 id) {
+        if (registry.newOrdersPaused()) revert Paused();
         if (p.commit == bytes32(0) || p.amountIn == 0 || p.deadline <= block.timestamp) revert BadOrder();
+        (uint128 minAmount,) = registry.orderBounds(p.tokenIn);
+        if (p.amountIn < minAmount) revert OrderTooSmall();
         if (!registry.vaultAllowed(p.vault) || IERC4626(p.vault).asset() != p.tokenIn) revert VaultNotAllowed();
 
         IERC20(p.tokenIn).forceApprove(p.vault, p.amountIn);
@@ -424,6 +434,9 @@ contract SableAccount is Initializable, ReentrancyGuard, EIP712 {
     {
         (OrderParams memory p, uint256 spend, uint256 kept) = _takeOrder(id, s, true);
         if (outputAmount < s.destMinOut) revert BadOrder();
+        if (registry.crossFillsPaused()) revert Paused();
+        (, uint128 maxCross) = registry.orderBounds(p.tokenIn);
+        if (maxCross != 0 && p.amountIn > maxCross) revert CrossTooLarge();
         address pool = registry.acrossSpokePool();
         if (pool == address(0)) revert NoSpokePool();
         uint256 net = _takeFee(p.tokenIn, spend);
@@ -502,19 +515,23 @@ contract SableAccount is Initializable, ReentrancyGuard, EIP712 {
         _cancel(id);
     }
 
-    function cancelOrderWithSig(uint256 id, uint256 nonce, uint256 deadline, uint64 epoch, bytes calldata sig)
+    /// @notice A cancel the agent signed; `gasFee` (in `tokenIn`, out of what comes back) repays the relayer.
+    function cancelOrderWithSig(uint256 id, uint256 gasFee, uint256 nonce, uint256 deadline, uint64 epoch, bytes calldata sig)
         external
         nonReentrant
     {
-        _useAgentSig(keccak256(abi.encode(CANCEL_TYPEHASH, id, nonce, deadline, epoch)), nonce, deadline, epoch, sig);
-        _cancel(id);
+        _useAgentSig(keccak256(abi.encode(CANCEL_TYPEHASH, id, gasFee, nonce, deadline, epoch)), nonce, deadline, epoch, sig);
+        (address tokenIn, uint256 returned) = _cancel(id);
+        if (gasFee != 0) _payGas(tokenIn, gasFee, returned);
     }
 
-    function _cancel(uint256 id) private {
+    function _cancel(uint256 id) private returns (address tokenIn, uint256 returned) {
         LimitOrder memory o = _orders[id];
         if (o.p.amountIn == 0) revert NoOrder();
         delete _orders[id];
-        emit OrderCancelled(id, IERC4626(o.p.vault).redeem(o.shares, address(this), address(this)));
+        returned = IERC4626(o.p.vault).redeem(o.shares, address(this), address(this));
+        tokenIn = o.p.tokenIn;
+        emit OrderCancelled(id, returned);
     }
 
     function order(uint256 id) external view returns (LimitOrder memory) {
