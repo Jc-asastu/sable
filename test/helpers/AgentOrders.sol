@@ -6,7 +6,7 @@ import {SableAccount} from "../../src/SableAccount.sol";
 
 /// @dev Independent client-side encoding for the v3 wire format. Keys are mock test fixtures only.
 abstract contract AgentOrders is Test {
-    string internal orderDomainVersion = "3";
+    string internal orderDomainVersion = "5";
     bytes32 private constant SWAP_TYPEHASH = keccak256(
         "SwapOrder(address router,address tokenIn,uint256 amountIn,address tokenOut,uint256 minOut,uint256 gasFee,uint256 nonce,uint256 deadline,uint64 epoch,bytes32 dataHash)"
     );

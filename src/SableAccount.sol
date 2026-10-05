@@ -15,9 +15,24 @@ interface IWMON {
     function withdraw(uint256 amount) external;
 }
 
-/// Relay's depository: a solver pays out on the destination chain once this deposit lands.
-interface IRelayDepository {
-    function depositErc20(address depositor, address token, uint256 amount, bytes32 id) external;
+/// Across' SpokePool (v3.5): a relayer pays `recipient` at least `outputAmount` of `outputToken` on the
+/// destination chain, or the deposit is refunded to `depositor` here after `fillDeadline`. Both are
+/// enforced by Across on-chain, so whoever submits a fill decides only when, never where (audit C-1).
+interface ISpokePool {
+    function deposit(
+        bytes32 depositor,
+        bytes32 recipient,
+        bytes32 inputToken,
+        bytes32 outputToken,
+        uint256 inputAmount,
+        uint256 outputAmount,
+        uint256 destinationChainId,
+        bytes32 exclusiveRelayer,
+        uint32 quoteTimestamp,
+        uint32 fillDeadline,
+        uint32 exclusivityDeadline,
+        bytes calldata message
+    ) external payable;
 }
 
 /// @title SableAccount
@@ -70,8 +85,8 @@ contract SableAccount is Initializable, ReentrancyGuard, EIP712 {
 
     /// A limit order: spend `amountIn` of `tokenIn` when the price is right, earning in `vault` until
     /// then (DECISIONS D17). Local orders receive `tokenOut` on Monad and `minOut` is the limit price.
-    /// Cross-chain orders (destChainId != 0) pay a Relay solver who delivers `destToken` to
-    /// `recipient` on the destination chain; `destMinOut` is the least the keeper's quote must give.
+    /// Cross-chain orders (destChainId != 0, an Across chain id) deposit into Across, which delivers at
+    /// least `destMinOut` of `destToken` to `recipient` on the destination chain or refunds this account.
     /// The public half of an order: only what custody needs. The limit lives in `commit`, so the
     /// chain never shows the price, what it buys or where it goes until the order fills (D20).
     struct OrderParams {
@@ -86,7 +101,7 @@ contract SableAccount is Initializable, ReentrancyGuard, EIP712 {
     /// `salt` is random, so the price can't be guessed by hashing candidate limits.
     struct Secret {
         address tokenOut;
-        uint32 destChainId;
+        uint64 destChainId; // Across chain ids (Solana's exceeds uint32)
         uint128 minOut;
         uint128 destMinOut;
         bytes32 recipient;
@@ -138,7 +153,7 @@ contract SableAccount is Initializable, ReentrancyGuard, EIP712 {
     uint256 public orderCount;
     /// Per destination chain, where the agent may send cross-chain orders (e.g. the owner's Solana
     /// wallet). Only the owner sets it, so a leaked agent key can't point a fill at its own address.
-    mapping(uint32 => bytes32) public crossRecipient;
+    mapping(uint64 => bytes32) public crossRecipient;
 
     event Swapped(
         address indexed by, address indexed tokenIn, address indexed tokenOut, uint256 amountIn, uint256 amountOut
@@ -154,10 +169,10 @@ contract SableAccount is Initializable, ReentrancyGuard, EIP712 {
     event OrderPlaced(uint256 indexed id, address indexed tokenIn, address indexed vault, uint128 amountIn, bytes32 commit);
     event OrderFilled(uint256 indexed id, uint256 spent, uint256 amountOut, uint256 yieldKept);
     event CrossFilled(
-        uint256 indexed id, bytes32 depositId, uint32 destChainId, bytes32 recipient, bytes32 destToken, uint256 paid
+        uint256 indexed id, uint64 indexed destChainId, bytes32 recipient, bytes32 destToken, uint256 paid, uint256 outputAmount
     );
     event OrderCancelled(uint256 indexed id, uint256 returned);
-    event CrossRecipientSet(uint32 indexed chainId, bytes32 recipient);
+    event CrossRecipientSet(uint64 indexed chainId, bytes32 recipient);
 
     error NotOwner();
     error NotAuthorized();
@@ -176,7 +191,7 @@ contract SableAccount is Initializable, ReentrancyGuard, EIP712 {
     error NoOrder();
     error BadOrder();
     error VaultNotAllowed();
-    error NoDepository();
+    error NoSpokePool();
 
     modifier onlyOwner() {
         if (msg.sender != owner) revert NotOwner();
@@ -185,7 +200,7 @@ contract SableAccount is Initializable, ReentrancyGuard, EIP712 {
 
     /// EIP712's domain uses the clone's own address (OZ rebuilds it when address(this) differs
     /// from the implementation), so an order signed for one account can't run on another.
-    constructor(TokenRegistry registry_, IWMON wmon_) EIP712("SableAccount", "3") {
+    constructor(TokenRegistry registry_, IWMON wmon_) EIP712("SableAccount", "5") {
         registry = registry_;
         wmon = wmon_;
         _disableInitializers();
@@ -396,23 +411,63 @@ contract SableAccount is Initializable, ReentrancyGuard, EIP712 {
         emit OrderFilled(id, spend, amountOut, kept);
     }
 
-    /// @notice A keeper fills a cross-chain order by paying Relay's depository from this account.
-    /// The contract builds the deposit itself; the keeper supplies only Relay's `depositId`, which it
-    /// must have quoted for this order's recipient, token and `destMinOut` (the trust bound in D17).
-    function fillCrossOrder(uint256 id, Secret calldata s, bytes32 depositId, uint256 gasFee) external nonReentrant {
+    /// How long Across relayers have to deliver before the deposit is refunded to this account.
+    uint32 public constant CROSS_FILL_WINDOW = 1 hours;
+
+    /// @notice A keeper fills a cross-chain order through Across. The contract builds the whole deposit
+    /// from the revealed order: recipient, output token and destination are the owner's, and the
+    /// output can't be below `destMinOut`. The keeper picks only `outputAmount` (at least the limit;
+    /// more is better for the owner) and a recent `quoteTimestamp`.
+    function fillCrossOrder(uint256 id, Secret calldata s, uint256 outputAmount, uint32 quoteTimestamp, uint256 gasFee)
+        external
+        nonReentrant
+    {
         (OrderParams memory p, uint256 spend, uint256 kept) = _takeOrder(id, s, true);
-        address depository = registry.relayDepository();
-        if (depository == address(0)) revert NoDepository();
+        if (outputAmount < s.destMinOut) revert BadOrder();
+        address pool = registry.acrossSpokePool();
+        if (pool == address(0)) revert NoSpokePool();
         uint256 net = _takeFee(p.tokenIn, spend);
         if (gasFee != 0) {
             _payGas(p.tokenIn, gasFee, net);
             net -= gasFee;
         }
-        IERC20(p.tokenIn).forceApprove(depository, net); // exactly: the depository can't take more
-        IRelayDepository(depository).depositErc20(address(this), p.tokenIn, net, depositId);
-        IERC20(p.tokenIn).forceApprove(depository, 0);
-        emit CrossFilled(id, depositId, s.destChainId, s.recipient, s.destToken, net);
+        _depositAcross(pool, s, p.tokenIn, net, outputAmount, quoteTimestamp);
+        emit CrossFilled(id, s.destChainId, s.recipient, s.destToken, net, outputAmount);
         emit OrderFilled(id, spend, net, kept);
+    }
+
+    /// The Across deposit: every field but the quote time and the (≥ limit) output comes from the order.
+    function _depositAcross(
+        address pool,
+        Secret calldata s,
+        address tokenIn,
+        uint256 net,
+        uint256 outputAmount,
+        uint32 quoteTimestamp
+    ) private {
+        IERC20(tokenIn).forceApprove(pool, net); // exactly: the pool can't take more
+        // Twelve arguments overflow the stack in one call, so the calldata is encoded in two halves:
+        // eleven static words, then the empty \`message\` (its offset, 12 words in, and a zero length).
+        bytes memory head = abi.encode(
+            bytes32(uint256(uint160(address(this)))), // depositor: refunds come back here
+            s.recipient,
+            bytes32(uint256(uint160(tokenIn))),
+            s.destToken,
+            net,
+            outputAmount
+        );
+        bytes memory tail = abi.encode(
+            uint256(s.destChainId),
+            bytes32(0), // no exclusive relayer: any relayer may deliver
+            quoteTimestamp,
+            uint32(block.timestamp) + CROSS_FILL_WINDOW,
+            uint32(0),
+            uint256(12 * 32), // message offset
+            uint256(0) // message length
+        );
+        (bool ok, bytes memory ret) = pool.call(bytes.concat(ISpokePool.deposit.selector, head, tail));
+        if (!ok) _bubble(ret);
+        IERC20(tokenIn).forceApprove(pool, 0);
     }
 
     /// Keeper-only: checks the revealed secret, the order's kind and expiry, deletes it and redeems
@@ -521,7 +576,7 @@ contract SableAccount is Initializable, ReentrancyGuard, EIP712 {
     }
 
     /// @notice Where agent-placed cross-chain orders to `chainId` may deliver. bytes32(0) disables it.
-    function setCrossRecipient(uint32 chainId, bytes32 recipient) external onlyOwner {
+    function setCrossRecipient(uint64 chainId, bytes32 recipient) external onlyOwner {
         crossRecipient[chainId] = recipient;
         emit CrossRecipientSet(chainId, recipient);
     }

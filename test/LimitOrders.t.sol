@@ -3,22 +3,38 @@ pragma solidity 0.8.28;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {AgentOrders} from "./helpers/AgentOrders.sol";
-import {SableAccount, IWMON} from "../src/SableAccount.sol";
+import {SableAccount, IWMON, ISpokePool} from "../src/SableAccount.sol";
 import {SableAccountFactory} from "../src/SableAccountFactory.sol";
 import {TokenRegistry} from "../src/TokenRegistry.sol";
 import {MockToken, MockWMON, MockVault} from "./mocks/Mocks.sol";
 import {MockRouter} from "./mocks/MockRouter.sol";
 
-/// Relay depository stand-in: pulls the deposit like the real one and records it.
-contract MockDepository {
-    address public depositor;
-    address public token;
-    uint256 public amount;
-    bytes32 public id;
+/// Across SpokePool stand-in: pulls the input like the real one and records the deposit.
+contract MockSpokePool {
+    bytes32 public depositor;
+    bytes32 public recipient;
+    bytes32 public inputToken;
+    bytes32 public outputToken;
+    uint256 public inputAmount;
+    uint256 public outputAmount;
+    uint256 public destinationChainId;
+    bytes32 public exclusiveRelayer;
+    uint32 public fillDeadline;
 
-    function depositErc20(address depositor_, address token_, uint256 amount_, bytes32 id_) external {
-        IERC20(token_).transferFrom(msg.sender, address(this), amount_);
-        (depositor, token, amount, id) = (depositor_, token_, amount_, id_);
+    uint256 public messageLength = type(uint256).max;
+
+    /// deposit(bytes32,bytes32,bytes32,bytes32,uint256,uint256,uint256,bytes32,uint32,uint32,uint32,bytes),
+    /// decoded in two halves (twelve arguments don't fit the stack in one function).
+    fallback() external payable {
+        require(bytes4(msg.data[:4]) == ISpokePool.deposit.selector, "not deposit");
+        (depositor, recipient, inputToken, outputToken, inputAmount, outputAmount) =
+            abi.decode(msg.data[4:196], (bytes32, bytes32, bytes32, bytes32, uint256, uint256));
+        uint256 offset;
+        (destinationChainId, exclusiveRelayer,, fillDeadline,, offset) =
+            abi.decode(msg.data[196:388], (uint256, bytes32, uint32, uint32, uint32, uint256));
+        require(offset == 12 * 32, "message offset");
+        messageLength = abi.decode(msg.data[388:420], (uint256));
+        IERC20(address(uint160(uint256(inputToken)))).transferFrom(msg.sender, address(this), inputAmount);
     }
 }
 
@@ -29,7 +45,7 @@ contract LimitOrdersTest is AgentOrders {
     MockWMON wmon;
     MockRouter router;
     MockVault vault;
-    MockDepository depository;
+    MockSpokePool pool;
     SableAccountFactory factory;
     TokenRegistry registry;
     SableAccount account;
@@ -40,7 +56,7 @@ contract LimitOrdersTest is AgentOrders {
     address keeper = makeAddr("keeper");
     address treasury = makeAddr("treasury");
     address stranger = makeAddr("stranger");
-    uint32 constant SOLANA = 792703809;
+    uint64 constant SOLANA = 34268394551451; // Across' Solana chain id
     bytes32 constant SOL_WALLET = keccak256("owner's solana wallet");
     uint256 nonce;
     /// The hidden half of the order the last helper built; fills reveal it.
@@ -60,7 +76,7 @@ contract LimitOrdersTest is AgentOrders {
         factory = new SableAccountFactory(address(this), IWMON(address(wmon)));
         registry = factory.registry();
         vault = new MockVault(usdc);
-        depository = new MockDepository();
+        pool = new MockSpokePool();
 
         address[] memory tokens = new address[](2);
         (tokens[0], tokens[1]) = (address(usdc), address(meme));
@@ -71,7 +87,7 @@ contract LimitOrdersTest is AgentOrders {
         registry.setFee(30, treasury);
         registry.setVault(address(vault), true);
         registry.setKeeper(keeper, true);
-        registry.setRelayDepository(address(depository));
+        registry.setAcrossSpokePool(address(pool));
         factory.openToEveryone();
 
         address[] memory routers = new address[](1);
@@ -327,7 +343,7 @@ contract LimitOrdersTest is AgentOrders {
         uint256 id = _placeAsAgent(_cross(300e6));
         vm.prank(keeper);
         vm.expectRevert(SableAccount.NotAuthorized.selector); // no approved recipient yet
-        account.fillCrossOrder(id, s, bytes32(0), 0);
+        account.fillCrossOrder(id, s, 2e9, uint32(block.timestamp), 0);
 
         vm.prank(stranger);
         vm.expectRevert(SableAccount.NotOwner.selector);
@@ -340,12 +356,12 @@ contract LimitOrdersTest is AgentOrders {
         uint256 bad = _placeAsAgent(_public(300e6));
         vm.prank(keeper);
         vm.expectRevert(SableAccount.NotAuthorized.selector);
-        account.fillCrossOrder(bad, s, bytes32(0), 0);
+        account.fillCrossOrder(bad, s, 2e9, uint32(block.timestamp), 0);
 
         _cross(300e6);
         uint256 good = _placeAsAgent(_public(300e6));
         vm.prank(keeper);
-        account.fillCrossOrder(good, s, bytes32(0), 0);
+        account.fillCrossOrder(good, s, 2e9, uint32(block.timestamp), 0);
         assertEq(account.orderValue(good), 0, "filled to the approved wallet");
     }
 
@@ -385,40 +401,50 @@ contract LimitOrdersTest is AgentOrders {
         account.fillOrder(id, s, address(router), _route(300e6, 1), 0);
     }
 
-    function test_keeperFillsCrossOrdersThroughTheDepository() public {
+    function test_keeperFillsCrossOrdersThroughAcrossWithTheOwnersRecipient() public {
         uint256 id = _placeAsOwner(_cross(300e6));
         vault.accrue(3e6);
-        bytes32 depositId = keccak256("relay request");
         uint256 fee = 300e6 * 30 / 10_000;
         vm.prank(keeper);
-        account.fillCrossOrder(id, s, depositId, 1e6);
-        assertEq(depository.amount(), 300e6 - fee - 1e6, "pays the solver what's left after fee and gas");
-        assertEq(depository.depositor(), address(account));
-        assertEq(depository.token(), address(usdc));
-        assertEq(depository.id(), depositId);
+        account.fillCrossOrder(id, s, 2.1e9, uint32(block.timestamp), 1e6); // a better quote than the 2 SOL limit
+        assertEq(pool.inputAmount(), 300e6 - fee - 1e6, "deposits what's left after fee and gas");
+        assertEq(pool.depositor(), bytes32(uint256(uint160(address(account)))), "refunds come back to the account");
+        assertEq(pool.recipient(), SOL_WALLET, "the recipient is the owner's, from the revealed order");
+        assertEq(pool.outputToken(), bytes32(0));
+        assertEq(pool.outputAmount(), 2.1e9);
+        assertEq(pool.destinationChainId(), SOLANA);
+        assertEq(pool.exclusiveRelayer(), bytes32(0), "no relayer is favoured");
+        assertEq(pool.fillDeadline(), block.timestamp + 1 hours);
         assertEq(usdc.balanceOf(treasury), fee + 1e6);
         assertApproxEqAbs(usdc.balanceOf(address(account)), 703e6, 1, "yield stays");
-        assertEq(usdc.allowance(address(account), address(depository)), 0);
+        assertEq(usdc.allowance(address(account), address(pool)), 0);
     }
 
-    function test_crossFillsAreKeeperOnlyCappedAndNeedADepository() public {
+    function test_aKeeperCantAskAcrossForLessThanTheLimit() public {
+        uint256 id = _placeAsOwner(_cross(300e6));
+        vm.prank(keeper);
+        vm.expectRevert(SableAccount.BadOrder.selector);
+        account.fillCrossOrder(id, s, 2e9 - 1, uint32(block.timestamp), 0);
+    }
+
+    function test_crossFillsAreKeeperOnlyCappedAndNeedAPool() public {
         uint256 id = _placeAsOwner(_cross(300e6));
         vm.prank(owner);
         vm.expectRevert(SableAccount.NotAuthorized.selector);
-        account.fillCrossOrder(id, s, bytes32(0), 0);
+        account.fillCrossOrder(id, s, 2e9, uint32(block.timestamp), 0);
 
         vm.prank(keeper);
         vm.expectRevert(SableAccount.GasFeeTooHigh.selector);
-        account.fillCrossOrder(id, s, bytes32(0), 20e6); // > 5%
+        account.fillCrossOrder(id, s, 2e9, uint32(block.timestamp), 20e6); // > 5%
 
         vm.prank(keeper);
         vm.expectRevert(SableAccount.BadOrder.selector);
         account.fillOrder(id, s, address(router), "", 0); // a cross order can't be filled locally
 
-        registry.setRelayDepository(address(0));
+        registry.setAcrossSpokePool(address(0));
         vm.prank(keeper);
-        vm.expectRevert(SableAccount.NoDepository.selector);
-        account.fillCrossOrder(id, s, bytes32(0), 0);
+        vm.expectRevert(SableAccount.NoSpokePool.selector);
+        account.fillCrossOrder(id, s, 2e9, uint32(block.timestamp), 0);
     }
 
     function test_monSentBeforeTheAccountExistsIsWrappedOnCreation() public {
@@ -439,7 +465,7 @@ contract LimitOrdersTest is AgentOrders {
         vm.expectRevert();
         registry.setKeeper(stranger, true);
         vm.expectRevert();
-        registry.setRelayDepository(stranger);
+        registry.setAcrossSpokePool(stranger);
         vm.stopPrank();
     }
 }

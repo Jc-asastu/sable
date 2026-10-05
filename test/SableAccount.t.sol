@@ -401,7 +401,7 @@ contract SableAccountTest is AgentOrders {
         address domain = mode % 3 == 2 ? address(factory.implementation()) : address(account);
         bytes memory action = _epochAction(withdrawal, 0, 0, block.timestamp + 1 hours, domain);
         vm.chainId(chain);
-        orderDomainVersion = "3";
+        orderDomainVersion = "5";
         _rejectAction(action, SableAccount.NotAuthorized.selector);
         assertFalse(account.nonceUsed(0));
     }

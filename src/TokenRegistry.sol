@@ -23,18 +23,19 @@ contract TokenRegistry is Ownable2Step {
 
     /// ERC-4626 vaults a limit order's funds may earn in while they wait (DECISIONS D17).
     mapping(address => bool) public vaultAllowed;
-    /// Keepers fill limit orders. A local fill can't beat the order's limit price, so a keeper only
-    /// decides when; a cross-chain fill also trusts it with the Relay request (see D17).
+    /// Keepers fill limit orders. A fill can't deliver less than the order's limit, locally (checked
+    /// here) or cross-chain (Across enforces recipient and minimum), so a keeper only decides when.
     mapping(address => bool) public isKeeper;
-    /// Relay's depository on this chain: where cross-chain fills pay the solver.
-    address public relayDepository;
+    /// Across' SpokePool on this chain: cross-chain fills deposit here, and Across enforces the
+    /// recipient and minimum output on-chain (audit C-1).
+    address public acrossSpokePool;
 
     event Listed(address indexed token, uint128 perTrade, uint128 daily);
     event Delisted(address indexed token);
     event FeeSet(uint16 feeBps, address feeRecipient);
     event VaultSet(address indexed vault, bool allowed);
     event KeeperSet(address indexed keeper, bool allowed);
-    event RelayDepositorySet(address depository);
+    event AcrossSpokePoolSet(address indexed pool);
 
     error LengthMismatch();
     error ZeroCap();
@@ -77,9 +78,9 @@ contract TokenRegistry is Ownable2Step {
         emit KeeperSet(keeper, allowed);
     }
 
-    function setRelayDepository(address depository) external onlyOwner {
-        relayDepository = depository;
-        emit RelayDepositorySet(depository);
+    function setAcrossSpokePool(address pool) external onlyOwner {
+        acrossSpokePool = pool;
+        emit AcrossSpokePoolSet(pool);
     }
 
     /// @notice Fee and recipient in one read, for accounts and the app.
