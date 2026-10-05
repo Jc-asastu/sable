@@ -246,3 +246,37 @@ Priority order. Each item names the finding it closes.
 ## 5. Current exposure
 
 At the time of writing, the keeper reported **0 open orders** on Monad and Base, so C-1's present exposure is nil. Every finding above becomes live as soon as users place cross-chain orders, which the app allows today. **Until item 3 (or its interim caps and monitor) ships, cross-chain orders should be capped or disabled in the app.**
+
+---
+
+## 6. Status after the v5 hardening branch (`feat/v5-hardening`, 2026-10-05)
+
+| Finding | Status | Where |
+|---|---|---|
+| **C-1** keeper-chosen Relay `depositId` | **Fixed in v5.** Cross fills deposit into Across' SpokePool with recipient, output token, chain and `outputAmount ≥ destMinOut` all taken from the revealed order; Across enforces them on-chain. Fork-tested against the real Monad SpokePool. v4 (live): cross fills off in the keeper and cross orders blocked in the app. | `SableAccount.fillCrossOrder`, `_depositAcross`; `test/fork/AcrossFork.t.sol` |
+| **C-2** single admin EOA | **Partly fixed.** v5 registry adds a **guardian** that can only reduce risk, instantly (revoke keeper, delist, disallow vault, pause new orders or cross fills; never lift a pause or grant). Pending: the Safe 2-of-3 and the 24h timelock (Phase 1, needs Juan's signers). | `TokenRegistry` guardian section |
+| **H-1** surplus capture on local fills | **Mitigated.** The monitor compares each fill with a fresh quote and revokes a keeper after 3 fills >2% short within an hour. A design fix (competitive fills) stays future work. | `monitor/src/rules.js` |
+| **H-2** relayer gas drain | **Fixed.** Agent place/cancel sign a capped `gasFee`; sponsored opening needs a deposit at the account address first. | `placeOrderWithSig`, `cancelOrderWithSig`; `keeper/src/relay.js` `funded()` |
+| **H-3** CDN and inline script risk | **Fixed (app, deploy pending).** viem, lightweight-charts and three.js are bundled same-origin; the build emits a CSP with hashed inline scripts, `frame-ancestors 'none'` and `nosniff`. Every page was checked under the policy with zero violations. | `vendor/`, `build.js headersFor` |
+| **H-4** one raw keeper key | **Pending** (Phase 2: role keys through Turnkey). | — |
+| **M-1** dust slows the filler | **Fixed.** Per-token `minAmount` on-chain; the keeper skips orders under `MIN_ORDER_USD` and serves big orders first. | `orderBounds`; `filler.tick` |
+| **M-2** plaintext hidden limits | **Fixed.** AES-256-GCM at rest with `SECRETS_KEY`, deleted when the order closes. | `keeper/src/ledger.js` |
+| **M-3** unbounded vault exposure | **Partly fixed.** The guardian can disallow a vault at once. Per-vault deposit caps would need cross-account accounting and are left for later. | `disallowVault` |
+| **M-4** endpoint resource use | **Fixed.** Rate limits on `/secret` and `/receipt`, and at most 200 receipt waits at once. | `keeper/src/index.js` |
+| **M-5** v5 `setWeight` pool drain | **Open by design.** cSABLE isn't built yet; its guards are in the D21 spec. | — |
+
+**New in v5, reviewed:**
+- A keeper can't push an Across deposit below the limit (`outputAmount ≥ destMinOut`).
+- An absurdly high `outputAmount` only delays the order: no relayer fills it, and Across refunds the account after `CROSS_FILL_WINDOW` (1h).
+- Guardian pauses never stop an owner from cancelling and withdrawing.
+- Slither on v5 shows only the same intended patterns as v4, plus intended zero-address uses in `setGuardian` and `setAcrossSpokePool` (zero disables).
+
+**Property tests:** `test/Orders.invariant.t.sol` runs 500 runs × 100 calls with an adversarial keeper. It picks the router mode (divert, underpay, overpull), outputs and gas, and sometimes tampers with the revealed secret or recipient. Invariants:
+- account USDC only in allowed places;
+- vault shares equal the open orders' shares;
+- no fill below its limit or to another recipient;
+- signatures work once.
+
+A probe invariant confirms the campaign really fills orders.
+
+**Size:** `SableAccount` is 23,236 bytes (limit 24,576), so cSABLE must live in its own contract.
