@@ -5,15 +5,22 @@ import { factoryAbi, accountAbi } from './chain.js';
 
 const order = '(address tokenIn, address vault, uint64 deadline, uint128 amountIn, bytes32 commit)';
 const relayable = parseAbi([
-  `function placeOrderWithSig(${order} p, uint256 nonce, uint256 sigDeadline, uint64 epoch, bytes sig)`,
-  'function cancelOrderWithSig(uint256 id, uint256 nonce, uint256 deadline, uint64 epoch, bytes sig)',
+  `function placeOrderWithSig(${order} p, uint256 gasFee, uint256 nonce, uint256 sigDeadline, uint64 epoch, bytes sig)`,
+  'function cancelOrderWithSig(uint256 id, uint256 gasFee, uint256 nonce, uint256 deadline, uint64 epoch, bytes sig)',
   'function swapWithSig((address router, address tokenIn, uint256 amountIn, address tokenOut, uint256 minOut, uint256 gasFee, uint256 nonce, uint256 deadline, uint64 epoch) o, bytes data, bytes sig)',
   'function withdrawWithSig((address token, uint256 amount, address to, uint256 gasFee, uint256 nonce, uint256 deadline, uint64 epoch) o, bytes sig)',
 ]);
 const LIMIT = { perAccount: 30, perIp: 60, windowMs: 60_000 };
 const MAX_DATA = 16_384; // bytes of calldata; a Kyber route fits easily
 
-export function createRelay({ pub, wallet, keeper, factory, log = console.log }) {
+const erc20 = parseAbi(['function balanceOf(address) view returns (uint256)']);
+
+/**
+ * `deposits`: [{ token, min }] — a sponsored opening is paid only once the account's address already
+ * holds at least one of them, so free accounts can't be minted to drain the keeper (audit H-2).
+ * A token of null means the native coin.
+ */
+export function createRelay({ pub, wallet, keeper, factory, deposits = [], log = console.log }) {
   const hits = new Map();
   const allow = (key, max) => {
     const now = Date.now(), recent = (hits.get(key) ?? []).filter((t) => now - t < LIMIT.windowMs);
@@ -43,6 +50,7 @@ export function createRelay({ pub, wallet, keeper, factory, log = console.log })
     if (!allow(`ip:${ip}`, LIMIT.perIp) || !allow(`open:${owner.toLowerCase()}`, 5)) return { status: 429, error: 'slow down' };
     if (!wallet) return { status: 503, error: 'relayer is in watch-only mode' };
     try {
+      if (!(await funded(owner))) return { status: 402, error: 'send a deposit to your account address first' };
       const args = [owner, agent, routers, BigInt(cooldown ?? 0), BigInt(deadline), sig];
       const gas = (await pub.estimateContractGas({ address: factory, abi: factoryAbi, functionName: 'createAccountFor', args, account: keeper })) * 12n / 10n;
       const hash = await wallet.writeContract({ address: factory, abi: factoryAbi, functionName: 'createAccountFor', args, gas });
@@ -51,6 +59,17 @@ export function createRelay({ pub, wallet, keeper, factory, log = console.log })
     } catch (e) {
       return { status: 422, error: e.shortMessage ?? 'the call would revert' };
     }
+  }
+
+  /** Whether `owner`'s predicted account already holds a deposit worth sponsoring. */
+  async function funded(owner) {
+    if (!deposits.length) return true;
+    const account = await pub.readContract({ address: factory, abi: factoryAbi, functionName: 'accountOf', args: [owner] });
+    for (const { token, min } of deposits) {
+      const have = token ? await pub.readContract({ address: token, abi: erc20, functionName: 'balanceOf', args: [account] }) : await pub.getBalance({ address: account });
+      if (have >= min) return true;
+    }
+    return false;
   }
 
   /** { account, data } → { hash } or { error, status }. */

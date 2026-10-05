@@ -27,9 +27,9 @@ const keeper = signer ?? getAddress(need('KEEPER_ADDRESS'));
 // Monad is always on (FACTORY, START_BLOCK…); Base joins when BASE_FACTORY is set (D19).
 const CHAINS = [
   { id: 143, name: 'Monad', sym: 'MON', kyber: 'monad', rpc: env.RPC_URL || 'https://rpc.monad.xyz', factory: need('FACTORY'), start: need('START_BLOCK'),
-    stateFile: env.STATE_FILE || 'state.json', usdc: '0x754704Bc059F8C67012fEd69BC8A327a5aafb603', wrapped: '0x3bd359C1119dA7Da1D913D1C4D2B7c461115433A' },
+    stateFile: env.STATE_FILE || 'state.json', usdc: '0x754704Bc059F8C67012fEd69BC8A327a5aafb603', wrapped: '0x3bd359C1119dA7Da1D913D1C4D2B7c461115433A', nativeFloor: 10n ** 18n },
   env.BASE_FACTORY && { id: 8453, name: 'Base', sym: 'ETH', kyber: 'base', rpc: env.BASE_RPC_URL || 'https://developer-access-mainnet.base.org,https://base-rpc.publicnode.com,https://base.drpc.org,https://mainnet.base.org', factory: env.BASE_FACTORY, start: need('BASE_START_BLOCK'),
-    stateFile: env.BASE_STATE_FILE || 'state-base.json', usdc: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913', wrapped: '0x4200000000000000000000000000000000000006' },
+    stateFile: env.BASE_STATE_FILE || 'state-base.json', usdc: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913', wrapped: '0x4200000000000000000000000000000000000006', nativeFloor: 3n * 10n ** 14n },
 ].filter(Boolean);
 
 const every = (ms, fn, tag) => { const run = async () => { try { await fn(); } catch (e) { log(`${tag} ${fn.name}: ${e.shortMessage ?? e.message}`); } setTimeout(run, ms); }; run(); };
@@ -44,9 +44,10 @@ for (const c of CHAINS) {
   const factory = getAddress(c.factory);
   const registry = await pub.readContract({ address: factory, abi: factoryAbi, functionName: 'registry' });
   const tagged = (m) => log(`[${c.name}] ${m}`);
-  const ledger = createLedger({ pub, factory, usdc: c.usdc, stateFile: c.stateFile, startBlock: BigInt(c.start), log: tagged });
-  const filler = createFiller({ pub, wallet, keeper, registry, secretOf: ledger.secretOf, crossFills: env.CROSS_FILLS === 'on', wmon: c.wrapped, usdc: c.usdc, chainId: c.id, kyberChain: c.kyber, log: tagged });
-  const relay = createRelay({ pub, wallet, keeper, factory, log: tagged });
+  const ledger = createLedger({ pub, factory, usdc: c.usdc, stateFile: c.stateFile, startBlock: BigInt(c.start), secretsKey: env.SECRETS_KEY || null, log: tagged });
+  const filler = createFiller({ pub, wallet, keeper, registry, secretOf: ledger.secretOf, crossFills: env.CROSS_FILLS === 'on', minUsd: Number(env.MIN_ORDER_USD || 1), wmon: c.wrapped, usdc: c.usdc, chainId: c.id, kyberChain: c.kyber, log: tagged });
+  // Sponsored opening waits for a deposit: 1 USDC, or the chain's native floor (audit H-2).
+  const relay = createRelay({ pub, wallet, keeper, factory, deposits: [{ token: c.usdc, min: 1_000_000n }, { token: null, min: c.nativeFloor }], log: tagged });
   nets.set(c.id, { ledger, relay, wallet, pub });
   tagged(`keeper ${signer ? signer.address : `${keeper} (watch-only)`} · factory ${factory} · registry ${registry}`);
 
@@ -84,6 +85,17 @@ async function keepSecret(net, { account, id, secret } = {}) {
 }
 
 // ── HTTP: health, points, relay, open, secret ──
+const hits = new Map();
+/** At most `max` requests per minute per key (in memory, per instance). */
+function allow(key, max) {
+  const now = Date.now(), recent = (hits.get(key) ?? []).filter((t) => now - t < 60_000);
+  if (hits.size > 50_000) hits.clear();
+  recent.push(now);
+  hits.set(key, recent);
+  return recent.length <= max;
+}
+let waiting = 0;
+const MAX_WAITING = 200; // receipts waited on at once; each holds a connection up to 10s
 const reply = (res, status, body) => {
   res.writeHead(status, { 'content-type': 'application/json', 'access-control-allow-headers': 'content-type', vary: 'origin' });
   res.end(JSON.stringify(body));
@@ -106,8 +118,12 @@ http.createServer(async (req, res) => {
   if (req.method === 'GET' && rcpt) {
     const net = nets.get(Number(rcpt[1]));
     if (!net) return reply(res, 400, { error: 'unsupported chain' });
-    const out = await net.relay.receipt(rcpt[2]);
-    return reply(res, out.status, out.mined ? { mined: out.mined } : { error: out.error });
+    if (!allow(`receipt:${req.socket.remoteAddress}`, 120) || waiting >= MAX_WAITING) return reply(res, 429, { error: 'slow down' });
+    waiting++;
+    try {
+      const out = await net.relay.receipt(rcpt[2]);
+      return reply(res, out.status, out.mined ? { mined: out.mined } : { error: out.error });
+    } finally { waiting--; }
   }
   if (req.method === 'POST' && (url.pathname === '/relay' || url.pathname === '/open' || url.pathname === '/secret')) {
     let body = '';
@@ -116,7 +132,10 @@ http.createServer(async (req, res) => {
     try { input = JSON.parse(body); } catch { return reply(res, 400, { error: 'json body required' }); }
     const net = netOf(input);
     if (!net) return reply(res, 400, { error: 'unsupported chain' });
-    if (url.pathname === '/secret') return reply(res, ...(await keepSecret(net, input)));
+    if (url.pathname === '/secret') {
+      if (!allow(`secret:${req.socket.remoteAddress}`, 60)) return reply(res, 429, { error: 'slow down' });
+      return reply(res, ...(await keepSecret(net, input)));
+    }
     const out = url.pathname === '/open' ? await net.relay.open(input, req.socket.remoteAddress) : await net.relay.relay(input, req.socket.remoteAddress);
     return reply(res, out.status, out.hash ? { hash: out.hash } : { error: out.error });
   }

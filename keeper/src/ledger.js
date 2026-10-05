@@ -1,13 +1,33 @@
 // Follows the chain: accounts the factory created, their orders, and the points each fill earns.
 // State is a small JSON file so a restart resumes from its cursor instead of rescanning history.
 import fs from 'node:fs';
+import crypto from 'node:crypto';
 import { factoryAbi, accountAbi } from './chain.js';
 import { fillPoints, dollarDays, multiplier } from './points.js';
 
 const CHUNK = 100n; // Monad's eth_getLogs serves at most 100 blocks per call
 const ADDRESSES_PER_CALL = 500;
 
-export function createLedger({ pub, factory, usdc, stateFile, startBlock, log = console.log }) {
+/**
+ * `secretsKey`: 32-byte hex key (Railway variable SECRETS_KEY). Hidden limits are kept with AES-256-GCM
+ * so a copy of the state file or its backup reveals nothing; without a key they are kept as before.
+ */
+export function createLedger({ pub, factory, usdc, stateFile, startBlock, secretsKey = null, log = console.log }) {
+  const key = secretsKey ? Buffer.from(secretsKey, 'hex') : null;
+  if (key && key.length !== 32) throw new Error('SECRETS_KEY must be 32 bytes of hex');
+  const seal = (obj) => {
+    if (!key) return obj;
+    const iv = crypto.randomBytes(12), c = crypto.createCipheriv('aes-256-gcm', key, iv);
+    const data = Buffer.concat([c.update(JSON.stringify(obj)), c.final()]);
+    return { v: 1, iv: iv.toString('base64'), tag: c.getAuthTag().toString('base64'), data: data.toString('base64') };
+  };
+  const open = (box) => {
+    if (box?.v !== 1) return box; // kept before encryption was turned on
+    if (!key) throw new Error('SECRETS_KEY needed to read sealed secrets');
+    const d = crypto.createDecipheriv('aes-256-gcm', key, Buffer.from(box.iv, 'base64'));
+    d.setAuthTag(Buffer.from(box.tag, 'base64'));
+    return JSON.parse(Buffer.concat([d.update(Buffer.from(box.data, 'base64')), d.final()]).toString());
+  };
   // secrets: the hidden half of each order by its commitment (D20). Only the keeper and the owner know them.
   const fresh = { cursor: String(startBlock - 1n), accounts: {}, orders: {}, points: {}, secrets: {} };
   let state = fresh;
@@ -40,6 +60,7 @@ export function createLedger({ pub, factory, usdc, stateFile, startBlock, log = 
     const o = state.orders[key];
     if (!o || o.closedAt !== null) return;
     o.closedAt = at;
+    delete state.secrets[o.commit]; // a closed order's limit has no reason to be kept
     if (l.eventName === 'OrderFilled' && o.usd !== null) {
       const spent = usdOf(o.tokenIn, l.args.spent);
       const earned = fillPoints(ordersOf(owner), spent, at);
@@ -84,11 +105,11 @@ export function createLedger({ pub, factory, usdc, stateFile, startBlock, log = 
     isAccount: (account) => Boolean(state.accounts[account.toLowerCase()]),
     /** Keeps a secret the caller already checked against its on-chain commitment. Saved at once. */
     remember(commit, secret) {
-      state.secrets[commit] = JSON.parse(JSON.stringify(secret, (_, v) => (typeof v === 'bigint' ? String(v) : v)));
+      state.secrets[commit] = seal(JSON.parse(JSON.stringify(secret, (_, v) => (typeof v === 'bigint' ? String(v) : v))));
       save();
     },
     secretOf(commit) {
-      const s = state.secrets[commit];
+      const s = state.secrets[commit] && open(state.secrets[commit]);
       return s && { ...s, minOut: BigInt(s.minOut), destMinOut: BigInt(s.destMinOut) };
     },
   };

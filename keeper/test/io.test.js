@@ -3,11 +3,11 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { encodeFunctionData, pad, parseAbi } from 'viem';
+import { encodeFunctionData, pad, parseAbi, keccak256, toHex } from 'viem';
 import { createLedger } from '../src/ledger.js';
 import { createFiller } from '../src/filler.js';
 import { createRelay } from '../src/relay.js';
-import { depositoryAbi, SOLANA } from '../src/chain.js';
+import { SOLANA } from '../src/chain.js';
 
 const DAY = 86_400;
 const A = (n) => `0x${n.toString(16).padStart(40, '0')}`;
@@ -52,7 +52,7 @@ test('ledger discovers accounts and orders, and a fill earns D18 points', async 
 // ── filler ──
 
 // `order` is both halves in one object: the chain returns it as `p`, the secret store returns it as the secret.
-function fillerHarness({ order, value, kyberOut, relayOut, depositOverride, wallet = true, secret = order, crossFills = true }) {
+function fillerHarness({ order, value, kyberOut, acrossOut, wallet = true, secret = order, crossFills = true, minUsd = 1 }) {
   const sent = [], logs = [];
   const pub = {
     readContract: async ({ functionName }) => ({
@@ -70,16 +70,11 @@ function fillerHarness({ order, value, kyberOut, relayOut, depositOverride, wall
     if (url.includes('tokenIn=' + WMON)) return body({ data: { routeSummary: { amountOut: '3000000' } } }); // MON = $0.03
     if (url.includes('/routes')) { assert.ok(url.includes('tokenOut=' + MEME), 'routes ask for the hidden tokenOut: ' + url); return body({ data: { routeSummary: { amountOut: String(kyberOut), amountOutUsd: '300' } } }); }
     if (url.includes('/route/build')) return body({ data: { amountOut: String(kyberOut), routerAddress: A(0x60), data: '0xdeadbeef' } });
-    if (url.includes('relay.link/quote')) {
-      const amount = BigInt(JSON.parse(options.body).amount);
-      const data = encodeFunctionData({ abi: depositoryAbi, functionName: 'depositErc20', args: [ACCOUNT, USDC, depositOverride ?? amount, pad('0x01')] });
-      return body({ details: { currencyOut: { amount: String(relayOut), amountFormatted: '2.5', currency: { symbol: 'SOL' } } },
-        steps: [{ id: 'deposit', items: [{ data: { to: DEPOSITORY, value: '0', data } }] }] });
-    }
+    if (url.includes('across.to/api/suggested-fees')) return body({ outputAmount: String(acrossOut), timestamp: '1800000000', isAmountTooLow: false, estimatedFillTimeSec: 2 });
     throw new Error('unexpected ' + url);
   };
   const filler = createFiller({ pub, wallet: wallet ? { writeContract: async (r) => { sent.push(r); return '0xhash'; } } : null,
-    keeper: KEEPER, registry: REGISTRY, wmon: WMON, usdc: USDC, secretOf: () => secret, crossFills, log: (m) => logs.push(m) });
+    keeper: KEEPER, registry: REGISTRY, wmon: WMON, usdc: USDC, secretOf: () => secret, crossFills, minUsd, log: (m) => logs.push(m) });
   return { filler, sent, logs };
 }
 const local = (minOut) => ({ tokenIn: USDC, vault: A(1), tokenOut: MEME, deadline: 9_999_999_999n, destChainId: 0, amountIn: 300_000_000n, minOut, destMinOut: 0n, recipient: pad('0x00'), destToken: pad('0x00') });
@@ -102,21 +97,26 @@ test('a local order waits below its limit and fills at it, paying gas in the bou
   assert.ok(gasFee > 0n && gasFee < 10n ** 18n, 'about $0.002 of gas, in MEME units');
 });
 
-test('a cross-chain order fills only when Relay quotes its minimum, with the exact deposit', async () => {
-  const short = fillerHarness({ order: cross(2_600_000_000n), value: 300_000_000n, relayOut: 2_527_000_000n });
+test('a cross-chain order fills through Across only when its quote reaches the limit', async () => {
+  const short = fillerHarness({ order: cross(2_600_000_000n), value: 300_000_000n, acrossOut: 2_527_000_000n });
   await short.filler.tick(open);
   assert.equal(short.sent.length, 0);
 
-  const ok = fillerHarness({ order: cross(2_500_000_000n), value: 300_000_000n, relayOut: 2_527_000_000n });
+  const ok = fillerHarness({ order: cross(2_500_000_000n), value: 300_000_000n, acrossOut: 2_527_000_000n });
   await ok.filler.tick(open);
   assert.equal(ok.sent.length, 1);
   assert.equal(ok.sent[0].functionName, 'fillCrossOrder');
-  assert.equal(ok.sent[0].args[2], pad('0x01'), "Relay's deposit id");
+  const [, , outputAmount, quoteTimestamp] = ok.sent[0].args;
+  assert.equal(outputAmount, 2_527_000_000n, "Across' quoted output, at least the limit");
+  assert.equal(quoteTimestamp, 1_800_000_000, "Across' quote time");
+});
 
-  const tampered = fillerHarness({ order: cross(2_500_000_000n), value: 300_000_000n, relayOut: 2_527_000_000n, depositOverride: 1n });
-  await tampered.filler.tick(open);
-  assert.equal(tampered.sent.length, 0, 'a deposit that differs from what the contract pays is refused');
-  assert.match(tampered.logs.join('\n'), /mismatch/);
+test('dust orders are skipped and larger orders go first (audit M-1)', async () => {
+  const h = fillerHarness({ order: local(1n), value: 300_000_000n, kyberOut: 10n ** 18n, minUsd: 5 });
+  await h.filler.tick([{ account: ACCOUNT, id: '1', usd: 0.5 }]);
+  assert.equal(h.sent.length, 0, 'under the floor');
+  await h.filler.tick([{ account: ACCOUNT, id: '1', usd: 50 }]);
+  assert.equal(h.sent.length, 1);
 });
 
 test('expired orders are returned to the account, and watch-only mode sends nothing', async () => {
@@ -152,8 +152,8 @@ test('the relayer only sends agent-signed calls for real Sable accounts, within 
     getGasPrice: async () => 1n, estimateGas: async () => 100_000n,
   };
   const { relay } = createRelay({ pub, wallet: { sendTransaction: async (tx) => { sent.push(tx); return '0xhash'; } }, keeper: KEEPER, factory: FACTORY, log() {} });
-  const cancel = encodeFunctionData({ abi: parseAbi(['function cancelOrderWithSig(uint256 id, uint256 nonce, uint256 deadline, uint64 epoch, bytes sig)']),
-    functionName: 'cancelOrderWithSig', args: [1n, 2n, 3n, 0n, '0x1234'] });
+  const cancel = encodeFunctionData({ abi: parseAbi(['function cancelOrderWithSig(uint256 id, uint256 gasFee, uint256 nonce, uint256 deadline, uint64 epoch, bytes sig)']),
+    functionName: 'cancelOrderWithSig', args: [1n, 0n, 2n, 3n, 0n, '0x1234'] });
   const ownerOnly = encodeFunctionData({ abi: parseAbi(['function withdraw(address token, uint256 amount, address to)']),
     functionName: 'withdraw', args: [USDC, 1n, KEEPER] });
 
@@ -213,4 +213,44 @@ test('cross-chain fills stay off unless CROSS_FILLS turns them on (audit C-1)', 
   const off = fillerHarness({ order: cross(2_500_000_000n), value: 300_000_000n, relayOut: 2_527_000_000n, crossFills: false });
   await off.filler.tick(open);
   assert.equal(off.sent.length, 0);
+});
+
+test('hidden limits are sealed at rest and forgotten once their order closes (audit M-2)', async () => {
+  const commit = pad('0x0c');
+  const events = [
+    { block: 10n, address: FACTORY, eventName: 'AccountCreated', args: { owner: OWNER, account: ACCOUNT } },
+    { block: 20n, address: ACCOUNT, eventName: 'OrderPlaced', args: { id: 1n, tokenIn: USDC, vault: A(1), amountIn: 1_000_000n, commit } },
+  ];
+  const pub = {
+    getBlockNumber: async () => BigInt(Math.max(...events.map((e) => Number(e.block)))),
+    getBlock: async () => ({ timestamp: 1_800_000_000n }),
+    getLogs: async ({ address, fromBlock, toBlock }) => events
+      .filter((e) => e.block >= fromBlock && e.block <= toBlock && (Array.isArray(address) ? address.map((x) => x.toLowerCase()).includes(e.address.toLowerCase()) : address === e.address))
+      .filter((e) => (address === FACTORY) === (e.eventName === 'AccountCreated'))
+      .map((e, i) => ({ ...e, blockNumber: e.block, logIndex: i })),
+  };
+  const stateFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'keeper-')), 'state.json');
+  const secretsKey = keccak256(toHex('test key')).slice(2);
+  const ledger = createLedger({ pub, factory: FACTORY, usdc: USDC, stateFile, startBlock: 1n, secretsKey, log() {} });
+  await ledger.sync();
+  ledger.remember(commit, { tokenOut: MEME, destChainId: 0, minOut: 1234n, destMinOut: 0n, recipient: pad('0x00'), destToken: pad('0x00'), salt: pad('0x05') });
+  assert.doesNotMatch(fs.readFileSync(stateFile, 'utf8'), /1234/, 'the limit is not readable in the file');
+  assert.equal(ledger.secretOf(commit).minOut, 1234n);
+  events.push({ block: 30n, address: ACCOUNT, eventName: 'OrderFilled', args: { id: 1n, spent: 1_000_000n, amountOut: 1n, yieldKept: 0n } });
+  await ledger.sync();
+  assert.equal(ledger.secretOf(commit), undefined, 'gone once the order closed');
+});
+
+test('sponsored opening waits until the account address holds a deposit (audit H-2)', async () => {
+  let usdc = 0n;
+  const pub = { getGasPrice: async () => 1n, estimateContractGas: async () => 200_000n,
+    readContract: async ({ functionName }) => (functionName === 'accountOf' ? ACCOUNT : usdc), getBalance: async () => 0n };
+  const sent = [];
+  const { open } = createRelay({ pub, wallet: { writeContract: async (tx) => { sent.push(tx); return '0xopen'; } }, keeper: KEEPER, factory: FACTORY,
+    deposits: [{ token: USDC, min: 1_000_000n }], log() {} });
+  const req = { owner: OWNER, agent: A(0xa9e), routers: [A(0x1234)], cooldown: 0, deadline: 9_999_999_999, sig: '0x1234' };
+  assert.equal((await open(req, 'ipA')).status, 402);
+  usdc = 1_000_000n;
+  assert.deepEqual(await open(req, 'ipA'), { status: 200, hash: '0xopen' });
+  assert.equal(sent.length, 1);
 });

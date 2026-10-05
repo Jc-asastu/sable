@@ -1,7 +1,8 @@
 // Contract interfaces and the encoding helpers the keeper needs. No I/O here.
-import { parseAbi, parseAbiParameters, encodeAbiParameters, keccak256, decodeFunctionData, getAddress, zeroAddress } from 'viem';
+import { parseAbi, parseAbiParameters, encodeAbiParameters, keccak256, getAddress } from 'viem';
 
-export const SOLANA = 792703809;
+/** Across' chain id for Solana (order secrets carry Across ids, so it needs uint64). */
+export const SOLANA = 34268394551451;
 
 export const factoryAbi = parseAbi([
   'event AccountCreated(address indexed owner, address account)',
@@ -13,12 +14,13 @@ export const factoryAbi = parseAbi([
 export const registryAbi = parseAbi([
   'function fee() view returns (uint16 feeBps, address feeRecipient)',
   'function isKeeper(address) view returns (bool)',
-  'function relayDepository() view returns (address)',
+  'function acrossSpokePool() view returns (address)',
+  'function crossFillsPaused() view returns (bool)',
 ]);
 
 const orderTuple = '((address tokenIn, address vault, uint64 deadline, uint128 amountIn, bytes32 commit) p, uint256 shares, bool byAgent)';
 // The hidden half of an order (D20): on-chain there is only keccak256(abi.encode(secret)).
-const secretTuple = '(address tokenOut, uint32 destChainId, uint128 minOut, uint128 destMinOut, bytes32 recipient, bytes32 destToken, bytes32 salt)';
+const secretTuple = '(address tokenOut, uint64 destChainId, uint128 minOut, uint128 destMinOut, bytes32 recipient, bytes32 destToken, bytes32 salt)';
 const secretParams = parseAbiParameters(secretTuple);
 
 /** The on-chain commitment to a secret; throws on a malformed one. */
@@ -31,11 +33,9 @@ export const accountAbi = parseAbi([
   `function order(uint256 id) view returns (${orderTuple})`,
   'function orderValue(uint256 id) view returns (uint256)',
   `function fillOrder(uint256 id, ${secretTuple} s, address router, bytes data, uint256 gasFee) returns (uint256)`,
-  `function fillCrossOrder(uint256 id, ${secretTuple} s, bytes32 depositId, uint256 gasFee)`,
+  `function fillCrossOrder(uint256 id, ${secretTuple} s, uint256 outputAmount, uint32 quoteTimestamp, uint256 gasFee)`,
   'function cancelOrder(uint256 id)',
 ]);
-
-export const depositoryAbi = parseAbi(['function depositErc20(address depositor, address token, uint256 amount, bytes32 id)']);
 
 // ── Solana keys are 32 bytes, written in base58 ──
 const B58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
@@ -69,25 +69,9 @@ export function recipientFor(chainId, b32) {
   return chainId === SOLANA ? base58(hexBytes(b32)) : getAddress(`0x${b32.slice(26)}`);
 }
 
-/** An order's bytes32 destination token as Relay names it; zero means the chain's native coin. */
-export function currencyFor(chainId, b32) {
-  if (chainId === SOLANA) return base58(hexBytes(b32)); // 32 zero bytes = 111…1, Solana's native SOL
-  return /^0x0{64}$/.test(b32) ? zeroAddress : getAddress(`0x${b32.slice(26)}`);
-}
-
-/**
- * Relay's deposit step must be exactly the deposit the contract itself will make: our depository,
- * this account as depositor, this token and amount. Returns Relay's deposit id, or throws.
- */
-export function depositIdFrom(tx, { depository, account, token, amount }) {
-  if (!tx || tx.to?.toLowerCase() !== depository.toLowerCase() || BigInt(tx.value ?? 0) !== 0n) throw new Error('deposit target mismatch');
-  const { functionName, args } = decodeFunctionData({ abi: depositoryAbi, data: tx.data });
-  if (functionName !== 'depositErc20') throw new Error('not a depositErc20');
-  const [depositor, depositToken, depositAmount, id] = args;
-  if (depositor.toLowerCase() !== account.toLowerCase() || depositToken.toLowerCase() !== token.toLowerCase() || depositAmount !== amount) {
-    throw new Error('deposit arguments mismatch');
-  }
-  return id;
+/** An order's bytes32 destination token as Across' API names it (an address, or a Solana mint). */
+export function tokenFor(chainId, b32) {
+  return chainId === SOLANA ? base58(hexBytes(b32)) : getAddress(`0x${b32.slice(26)}`);
 }
 
 /**

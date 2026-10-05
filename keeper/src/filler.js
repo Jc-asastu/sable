@@ -1,10 +1,10 @@
 // Fills open orders whose market price has reached their limit, and returns expired ones.
 // Every transaction is simulated first: a fill that would revert costs nothing.
-import { accountAbi, registryAbi, recipientFor, currencyFor, depositIdFrom, gasFeeIn } from './chain.js';
+import { accountAbi, registryAbi, recipientFor, tokenFor, gasFeeIn } from './chain.js';
 
-const RELAY = 'https://api.relay.link';
+const ACROSS = 'https://app.across.to/api';
 const SLIPPAGE_BPS = 50n;
-const CROSS_GAS = 700_000n; // fillCrossOrder budget: vault redeem + fee + Relay deposit, with headroom
+const CROSS_GAS = 700_000n; // fillCrossOrder budget: vault redeem + fee + Across deposit, with headroom
 
 async function json(url, options) {
   const r = await fetch(url, { ...options, signal: AbortSignal.timeout(8_000) });
@@ -17,7 +17,8 @@ async function json(url, options) {
  * `send(request)` returns a tx hash and waits for its receipt.
  */
 /** `secretOf(commit)` returns an order's hidden half, or nothing if the keeper never got it. */
-export function createFiller({ pub, wallet, keeper, registry, wmon, usdc, secretOf, crossFills = false, chainId = 143, kyberChain = 'monad', log = console.log }) {
+/** `minUsd`: orders worth less (in USDC) are skipped, so dust can't slow every pass (audit M-1). */
+export function createFiller({ pub, wallet, keeper, registry, wmon, usdc, secretOf, crossFills = false, minUsd = 1, chainId = 143, kyberChain = 'monad', log = console.log }) {
   const KYBER = `https://aggregator-api.kyberswap.com/${kyberChain}/api/v1`;
   let monUsd = 0, monUsdAt = 0;
 
@@ -61,22 +62,18 @@ export function createFiller({ pub, wallet, keeper, registry, wmon, usdc, secret
     await send(account, 'fillOrder', [id, s, build.routerAddress, build.data, gasFee], gas);
   }
 
+  // Across delivers to the order's own recipient and at least its own limit, checked on-chain by the
+  // account and by Across: the keeper picks only when and how much above the limit (audit C-1).
   async function fillCross(account, id, p, s, spend, feeBps) {
-    const depository = await pub.readContract({ address: registry, abi: registryAbi, functionName: 'relayDepository' });
     const afterFee = spend - spend * feeBps / 10_000n;
     const gasFee = gasFeeIn(await gasUsd(CROSS_GAS), 1e-6, afterFee); // paid in USDC (6 decimals)
     if (gasFee === null) return;
     const amount = afterFee - gasFee;
-    const quote = await json(`${RELAY}/quote`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({
-      user: account, recipient: recipientFor(s.destChainId, s.recipient), originChainId: chainId, destinationChainId: s.destChainId,
-      originCurrency: p.tokenIn, destinationCurrency: currencyFor(s.destChainId, s.destToken), amount: String(amount), tradeType: 'EXACT_INPUT',
-    }) });
-    if (BigInt(quote.details?.currencyOut?.amount ?? 0) < s.destMinOut) return; // not at the limit yet
-    const step = quote.steps?.find((s) => s.id === 'deposit');
-    // Throws unless Relay asks for exactly the deposit the contract will make (D17 trust bound).
-    const depositId = depositIdFrom(step?.items?.[0]?.data, { depository, account, token: p.tokenIn, amount });
-    log(`cross fill ${account}#${id}: ${amount} → ${quote.details.currencyOut.amountFormatted} ${quote.details.currencyOut.currency.symbol} to ${recipientFor(s.destChainId, s.recipient)}`);
-    await send(account, 'fillCrossOrder', [id, s, depositId, gasFee], CROSS_GAS);
+    const q = await json(`${ACROSS}/suggested-fees?inputToken=${p.tokenIn}&outputToken=${tokenFor(s.destChainId, s.destToken)}`
+      + `&originChainId=${chainId}&destinationChainId=${s.destChainId}&amount=${amount}`);
+    if (q.isAmountTooLow || BigInt(q.outputAmount ?? 0) < s.destMinOut) return; // not at the limit yet
+    log(`cross fill ${account}#${id}: ${amount} → ${q.outputAmount} to ${recipientFor(s.destChainId, s.recipient)} in ~${q.estimatedFillTimeSec}s`);
+    await send(account, 'fillCrossOrder', [id, s, BigInt(q.outputAmount), Number(q.timestamp), gasFee], CROSS_GAS);
   }
 
   /** One pass over the open orders. One at a time: a single keeper key has one nonce sequence. */
@@ -84,7 +81,9 @@ export function createFiller({ pub, wallet, keeper, registry, wmon, usdc, secret
     if (!openOrders.length) return;
     const [feeBps] = await pub.readContract({ address: registry, abi: registryAbi, functionName: 'fee' });
     const now = BigInt(Math.floor(Date.now() / 1000));
-    for (const o of openOrders) {
+    // Dust is skipped and larger orders go first, so spam can't delay real fills (audit M-1).
+    const queue = openOrders.filter((o) => o.usd == null || o.usd >= minUsd).sort((a, b) => (b.usd ?? 0) - (a.usd ?? 0));
+    for (const o of queue) {
       const id = BigInt(o.id);
       try {
         const { p } = await pub.readContract({ address: o.account, abi: accountAbi, functionName: 'order', args: [id] });

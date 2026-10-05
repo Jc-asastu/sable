@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { encodeFunctionData, pad } from 'viem';
+import { pad } from 'viem';
 import { multiplier, dollarDays, fillPoints } from '../src/points.js';
-import { base58, fromBase58, recipientFor, currencyFor, depositIdFrom, gasFeeIn, depositoryAbi, SOLANA } from '../src/chain.js';
+import { base58, fromBase58, recipientFor, tokenFor, gasFeeIn, SOLANA } from '../src/chain.js';
 
 const DAY = 86_400;
 
@@ -28,33 +28,20 @@ test('only the last 7 days count, and closed orders stop counting', () => {
   assert.equal(dollarDays([{ usd: 500, openedAt: now - 3 * DAY, closedAt: now - 1 * DAY }], now), 1_000);
 });
 
-test('Solana keys round-trip through bytes32, and zero means native SOL', () => {
+test('Solana keys round-trip through bytes32', () => {
   const mint = 'DEW9dSN6QpWyNthphCpMmAbZP1Q4cEKR9xQXAri98WDP';
   const bytes = fromBase58(mint);
   assert.equal(bytes.length, 32);
   assert.equal(base58(bytes), mint);
   const b32 = '0x' + Buffer.from(bytes).toString('hex');
   assert.equal(recipientFor(SOLANA, b32), mint);
-  assert.equal(currencyFor(SOLANA, '0x' + '00'.repeat(32)), '11111111111111111111111111111111');
+  assert.equal(tokenFor(SOLANA, b32), mint, "Across names Solana tokens by mint");
 });
 
 test('EVM recipients and tokens come from the low 20 bytes', () => {
   const a = '0x64C5a9630C709F7454Feeb9302AC7a857F4774cF';
   assert.equal(recipientFor(56, pad(a)), a);
-  assert.equal(currencyFor(8453, '0x' + '00'.repeat(32)), '0x0000000000000000000000000000000000000000');
-});
-
-test('a Relay deposit step is accepted only if it matches the deposit the contract makes', () => {
-  const ctx = { depository: '0x4cd00e387622c35bddb9b4c962c136462338bc31', account: '0x12e053db3c550b591ac1bd12e610dc842ca58a73',
-    token: '0x754704Bc059F8C67012fEd69BC8A327a5aafb603', amount: 298_000_000n };
-  const id = '0x' + 'ab'.repeat(32);
-  const data = (over = {}) => encodeFunctionData({ abi: depositoryAbi, functionName: 'depositErc20',
-    args: [over.account ?? ctx.account, over.token ?? ctx.token, over.amount ?? ctx.amount, id] });
-  assert.equal(depositIdFrom({ to: ctx.depository, value: '0', data: data() }, ctx), id);
-  assert.throws(() => depositIdFrom({ to: '0x' + '11'.repeat(20), value: '0', data: data() }, ctx), /target/);
-  assert.throws(() => depositIdFrom({ to: ctx.depository, value: '0', data: data({ amount: 1n }) }, ctx), /mismatch/);
-  assert.throws(() => depositIdFrom({ to: ctx.depository, value: '0', data: data({ account: '0x' + '22'.repeat(20) }) }, ctx), /mismatch/);
-  assert.throws(() => depositIdFrom({ to: ctx.depository, value: '5', data: data() }, ctx), /target/);
+  assert.equal(tokenFor(8453, pad(a)), a);
 });
 
 test('gas fee is converted into the paid token and refused above the 5% cap', () => {
