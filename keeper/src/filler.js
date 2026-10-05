@@ -46,7 +46,7 @@ export function createFiller({ pub, wallet, keeper, registry, wmon, usdc, secret
   async function fillLocal(account, id, p, s, spend, feeBps) {
     const net = spend - spend * feeBps / 10_000n;
     const head = { headers: { 'x-client-id': 'sable', 'Content-Type': 'application/json' } };
-    const route = (await json(`${KYBER}/routes?tokenIn=${p.tokenIn}&tokenOut=${p.tokenOut}&amountIn=${net}`, head)).data;
+    const route = (await json(`${KYBER}/routes?tokenIn=${p.tokenIn}&tokenOut=${s.tokenOut}&amountIn=${net}`, head)).data;
     const out = BigInt(route.routeSummary.amountOut);
     if (out < s.minOut) return; // the market hasn't reached the limit yet
     const build = (await json(`${KYBER}/route/build`, { method: 'POST', ...head,

@@ -56,7 +56,9 @@ function fillerHarness({ order, value, kyberOut, relayOut, depositOverride, wall
   const sent = [], logs = [];
   const pub = {
     readContract: async ({ functionName }) => ({
-      fee: [30, A(0x7ea)], relayDepository: DEPOSITORY, order: { p: order, shares: 1n }, orderValue: value,
+      fee: [30, A(0x7ea)], relayDepository: DEPOSITORY, orderValue: value,
+      // the chain only knows the public half; everything else comes from the secret
+      order: { p: { tokenIn: order.tokenIn, vault: order.vault, deadline: order.deadline, amountIn: order.amountIn, commit: pad('0x0c') }, shares: 1n, byAgent: false },
     })[functionName],
     getGasPrice: async () => 100_000_000_000n,
     estimateContractGas: async () => 600_000n,
@@ -66,7 +68,7 @@ function fillerHarness({ order, value, kyberOut, relayOut, depositOverride, wall
   globalThis.fetch = async (url, options) => {
     const body = (x) => ({ ok: true, json: async () => x });
     if (url.includes('tokenIn=' + WMON)) return body({ data: { routeSummary: { amountOut: '3000000' } } }); // MON = $0.03
-    if (url.includes('/routes')) return body({ data: { routeSummary: { amountOut: String(kyberOut), amountOutUsd: '300' } } });
+    if (url.includes('/routes')) { assert.ok(url.includes('tokenOut=' + MEME), 'routes ask for the hidden tokenOut: ' + url); return body({ data: { routeSummary: { amountOut: String(kyberOut), amountOutUsd: '300' } } }); }
     if (url.includes('/route/build')) return body({ data: { amountOut: String(kyberOut), routerAddress: A(0x60), data: '0xdeadbeef' } });
     if (url.includes('relay.link/quote')) {
       const amount = BigInt(JSON.parse(options.body).amount);
