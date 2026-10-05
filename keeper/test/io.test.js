@@ -254,3 +254,12 @@ test('sponsored opening waits until the account address holds a deposit (audit H
   assert.deepEqual(await open(req, 'ipA'), { status: 200, hash: '0xopen' });
   assert.equal(sent.length, 1);
 });
+
+test('relayed place and cancel must carry at least the minimum gas fee (audit H-2)', async () => {
+  const pub = { readContract: async ({ functionName, args }) => (functionName === 'owner' ? OWNER : args[0] === OWNER ? ACCOUNT : A(0xbad)), estimateGas: async () => 100_000n };
+  const { relay } = createRelay({ pub, wallet: { sendTransaction: async () => '0xhash' }, keeper: KEEPER, factory: FACTORY, minPlaceFee: 5_000n, log() {} });
+  const cancel = (fee) => encodeFunctionData({ abi: parseAbi(['function cancelOrderWithSig(uint256 id, uint256 gasFee, uint256 nonce, uint256 deadline, uint64 epoch, bytes sig)']),
+    functionName: 'cancelOrderWithSig', args: [1n, fee, 2n, 3n, 0n, '0x1234'] });
+  assert.equal((await relay({ account: ACCOUNT, data: cancel(0n) }, 'ipF')).status, 402);
+  assert.equal((await relay({ account: ACCOUNT, data: cancel(5_000n) }, 'ipF')).status, 200);
+});

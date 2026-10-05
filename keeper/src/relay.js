@@ -20,7 +20,8 @@ const erc20 = parseAbi(['function balanceOf(address) view returns (uint256)']);
  * holds at least one of them, so free accounts can't be minted to drain the keeper (audit H-2).
  * A token of null means the native coin.
  */
-export function createRelay({ pub, wallet, keeper, factory, deposits = [], log = console.log }) {
+/** `minPlaceFee`: the least gas fee, in the order token's units, a relayed place or cancel must carry. */
+export function createRelay({ pub, wallet, keeper, factory, deposits = [], minPlaceFee = 0n, log = console.log }) {
   const hits = new Map();
   const allow = (key, max) => {
     const now = Date.now(), recent = (hits.get(key) ?? []).filter((t) => now - t < LIMIT.windowMs);
@@ -75,8 +76,12 @@ export function createRelay({ pub, wallet, keeper, factory, deposits = [], log =
   /** { account, data } → { hash } or { error, status }. */
   async function relay({ account, data }, ip) {
     if (!isAddress(account) || !isHex(data) || data.length > 2 + MAX_DATA * 2) return { status: 400, error: 'account and calldata required' };
-    let fn;
-    try { fn = decodeFunctionData({ abi: relayable, data }).functionName; } catch { return { status: 400, error: 'not a relayable call' }; }
+    let fn, args;
+    try { ({ functionName: fn, args } = decodeFunctionData({ abi: relayable, data })); } catch { return { status: 400, error: 'not a relayable call' }; }
+    // Placing and cancelling pay their own relay (audit H-2): at least `minPlaceFee` in the order's token.
+    if ((fn === 'placeOrderWithSig' || fn === 'cancelOrderWithSig') && args[1] < minPlaceFee) {
+      return { status: 402, error: `the order must repay its relay: gasFee of at least ${minPlaceFee}` };
+    }
     if (!allow(`ip:${ip}`, LIMIT.perIp) || !allow(`acct:${account.toLowerCase()}`, LIMIT.perAccount)) return { status: 429, error: 'slow down' };
     if (!(await genuine(account).catch(() => false))) return { status: 400, error: 'not a Sable account' };
     if (!wallet) return { status: 503, error: 'relayer is in watch-only mode' };

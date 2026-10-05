@@ -47,7 +47,8 @@ for (const c of CHAINS) {
   const ledger = createLedger({ pub, factory, usdc: c.usdc, stateFile: c.stateFile, startBlock: BigInt(c.start), secretsKey: env.SECRETS_KEY || null, log: tagged });
   const filler = createFiller({ pub, wallet, keeper, registry, secretOf: ledger.secretOf, crossFills: env.CROSS_FILLS === 'on', minUsd: Number(env.MIN_ORDER_USD || 1), wmon: c.wrapped, usdc: c.usdc, chainId: c.id, kyberChain: c.kyber, log: tagged });
   // Sponsored opening waits for a deposit: 1 USDC, or the chain's native floor (audit H-2).
-  const relay = createRelay({ pub, wallet, keeper, factory, deposits: [{ token: c.usdc, min: 1_000_000n }, { token: null, min: c.nativeFloor }], log: tagged });
+  const relay = createRelay({ pub, wallet, keeper, factory, deposits: [{ token: c.usdc, min: 1_000_000n }, { token: null, min: c.nativeFloor }],
+    minPlaceFee: BigInt(env.MIN_PLACE_FEE || 5_000), log: tagged }); // 0.005 USDC
   nets.set(c.id, { ledger, relay, wallet, pub });
   tagged(`keeper ${signer ? signer.address : `${keeper} (watch-only)`} · factory ${factory} · registry ${registry}`);
 
