@@ -2,3 +2,6 @@ node_modules/
 state.json
 state.json.tmp
 .env
+
+# local helpers that load secrets into Railway from the clipboard
+*.ps1
