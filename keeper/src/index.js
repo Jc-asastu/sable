@@ -1,28 +1,28 @@
 // Sable keeper: follows accounts and orders, fills orders at their limit, returns expired ones,
 // relays agent-signed calls and serves points. Configuration comes only from the environment;
-// the private key is never written anywhere (set it in Railway's variables).
+// keys are never written anywhere (set them in Railway's variables, or keep them in Turnkey).
 //
-//   FACTORY=0x…  START_BLOCK=<factory deploy block>  [KEEPER_PRIVATE_KEY=0x…]  node src/index.js
+//   FACTORY=0x…  START_BLOCK=<factory deploy block>  [keys, see signers.js]  node src/index.js
 //
-// Without KEEPER_PRIVATE_KEY it runs watch-only: it reads, computes points and logs what it
+// Without a filler key it runs watch-only: it reads, computes points and logs what it
 // would send (KEEPER_ADDRESS must then name a registered keeper so simulations pass).
 import http from 'node:http';
 import { createPublicClient, http as rpcHttp, fallback, defineChain, getAddress } from 'viem';
-import { privateKeyToAccount } from 'viem/accounts';
 import { factoryAbi, accountAbi, commitOf } from './chain.js';
 import { createLedger } from './ledger.js';
 import { createFiller } from './filler.js';
 import { createRelay } from './relay.js';
 import { createSender } from './sender.js';
+import { ROLES, signerFor } from './signers.js';
 
 const env = process.env;
 const need = (name) => { if (!env[name]) throw new Error(`${name} is required`); return env[name]; };
 const ORIGINS = (env.ALLOWED_ORIGIN || 'https://sabledex.vercel.app').split(',').map((o) => o.trim()); // comma-separated
 const log = (m) => console.log(new Date().toISOString(), m);
-// MetaMask exports keys without 0x; accept both. One keeper key serves every chain.
-const rawKey = env.KEEPER_PRIVATE_KEY?.trim();
-const signer = rawKey ? privateKeyToAccount(rawKey.startsWith('0x') ? rawKey : `0x${rawKey}`) : null;
-const keeper = signer ?? getAddress(need('KEEPER_ADDRESS'));
+// Each role's key serves every chain.
+const signers = Object.fromEntries(await Promise.all(ROLES.map(async (r) => [r, await signerFor(r)])));
+const keeper = signers.filler?.address ?? getAddress(need('KEEPER_ADDRESS'));
+const relayer = signers.relayer?.address ?? keeper;
 
 // Monad is always on (FACTORY, START_BLOCK…); Base joins when BASE_FACTORY is set (D19).
 const CHAINS = [
@@ -40,17 +40,20 @@ for (const c of CHAINS) {
   // Public RPCs rate-limit; a comma list in the RPC variable rotates to the next one on failure.
   const transport = () => fallback(c.rpc.split(',').map((u) => rpcHttp(u.trim(), { timeout: 15_000 })));
   const pub = createPublicClient({ chain, transport: transport(), batch: { multicall: true } });
-  const wallet = signer ? createSender({ pub, account: signer, chainId: c.id, log: (m) => log(`[${c.name}] ${m}`) }) : null;
+  const tagged = (m) => log(`[${c.name}] ${m}`);
+  // One sender per address and chain: two roles on the old shared key must share its nonce sequence.
+  const senders = new Map();
+  const senderOf = (a) => a && (senders.get(a.address) ?? senders.set(a.address, createSender({ pub, account: a, chainId: c.id, log: tagged })).get(a.address));
+  const wallet = senderOf(signers.filler), relayWallet = senderOf(signers.relayer);
   const factory = getAddress(c.factory);
   const registry = await pub.readContract({ address: factory, abi: factoryAbi, functionName: 'registry' });
-  const tagged = (m) => log(`[${c.name}] ${m}`);
   const ledger = createLedger({ pub, factory, usdc: c.usdc, stateFile: c.stateFile, startBlock: BigInt(c.start), secretsKey: env.SECRETS_KEY || null, log: tagged });
   const filler = createFiller({ pub, wallet, keeper, registry, secretOf: ledger.secretOf, crossFills: env.CROSS_FILLS === 'on', minUsd: Number(env.MIN_ORDER_USD || 1), wmon: c.wrapped, usdc: c.usdc, chainId: c.id, kyberChain: c.kyber, log: tagged });
   // Sponsored opening waits for a deposit: 1 USDC, or the chain's native floor (audit H-2).
-  const relay = createRelay({ pub, wallet, keeper, factory, deposits: [{ token: c.usdc, min: 1_000_000n }, { token: null, min: c.nativeFloor }],
+  const relay = createRelay({ pub, wallet: relayWallet, keeper: relayer, factory, deposits: [{ token: c.usdc, min: 1_000_000n }, { token: null, min: c.nativeFloor }],
     minPlaceFee: BigInt(env.MIN_PLACE_FEE || 5_000), log: tagged }); // 0.005 USDC
   nets.set(c.id, { ledger, relay, wallet, pub });
-  tagged(`keeper ${signer ? signer.address : `${keeper} (watch-only)`} · factory ${factory} · registry ${registry}`);
+  tagged(`filler ${wallet ? keeper : `${keeper} (watch-only)`} · relayer ${relayWallet ? relayer : 'none'} · factory ${factory} · registry ${registry}`);
 
   // One key, one nonce sequence per chain: every pass over orders waits for the previous one.
   let queue = Promise.resolve();

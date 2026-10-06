@@ -50,3 +50,18 @@ test('gas fee is converted into the paid token and refused above the 5% cap', ()
   assert.equal(gasFeeIn(20, 1e-6, 300_000_000n), null, '$20 of gas on $300 breaks the cap');
   assert.equal(gasFeeIn(0.002, 0, 300_000_000n), null, 'no price, no fee guess');
 });
+
+test('each role signs with its own key, the old shared key covers both, and none means watch-only', async () => {
+  const { signerFor } = await import('../src/signers.js');
+  const k1 = '0x' + '11'.repeat(32), k2 = '22'.repeat(32);
+  const a = await signerFor('filler', { FILLER_PRIVATE_KEY: k1, RELAYER_PRIVATE_KEY: k2 });
+  const b = await signerFor('relayer', { FILLER_PRIVATE_KEY: k1, RELAYER_PRIVATE_KEY: k2 });
+  assert.notEqual(a.address, b.address);
+  const shared = await signerFor('relayer', { KEEPER_PRIVATE_KEY: k2 });
+  assert.equal(shared.address, b.address);
+  assert.equal(await signerFor('filler', {}), null);
+  // Turnkey: the address is taken as given and no local key is read.
+  const tk = await signerFor('filler', { TURNKEY_ORGANIZATION_ID: 'org', TURNKEY_FILLER_ADDRESS: a.address, TURNKEY_API_PUBLIC_KEY: '02' + '00'.repeat(32), TURNKEY_API_PRIVATE_KEY: '01'.repeat(32), FILLER_PRIVATE_KEY: k2 });
+  assert.equal(tk.address, a.address);
+  assert.equal(await signerFor('relayer', { TURNKEY_ORGANIZATION_ID: 'org' }), null);
+});
