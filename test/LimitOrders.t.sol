@@ -177,13 +177,22 @@ contract LimitOrdersTest is AgentOrders {
         assertApproxEqAbs(account.orderValue(id), 303e6, 1);
     }
 
-    function test_rejectsUnlistedVaultWrongAssetAndBadShapes() public {
-        MockVault other = new MockVault(usdc);
+    function test_theOwnerMayChooseAnyVaultButTheAgentOnlyAllowedOnes() public {
+        MockVault other = new MockVault(usdc); // not in the registry
         SableAccount.OrderParams memory p = _local(100e6, 1);
         p.vault = address(other);
-        vm.prank(owner);
-        vm.expectRevert(SableAccount.VaultNotAllowed.selector);
-        account.placeOrder(p);
+        uint256 id = _placeAsOwner(p);
+        assertEq(account.orderValue(id), 100e6, "the owner's own pick holds the order");
+        assertEq(usdc.allowance(address(account), address(other)), 0, "and gets no lasting approval");
+
+        _local(100e6, 1);
+        p = _public(100e6);
+        p.vault = address(other);
+        _expectAgentRevert(p, SableAccount.VaultNotAllowed.selector);
+    }
+
+    function test_rejectsWrongAssetAndBadShapes() public {
+        SableAccount.OrderParams memory p = _local(100e6, 1);
 
         MockVault wrongAsset = new MockVault(meme);
         registry.setVault(address(wrongAsset), true);

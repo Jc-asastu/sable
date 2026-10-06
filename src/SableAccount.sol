@@ -398,7 +398,10 @@ contract SableAccount is Initializable, ReentrancyGuard, EIP712 {
         if (p.commit == bytes32(0) || p.amountIn == 0 || p.deadline <= block.timestamp) revert BadOrder();
         (uint128 minAmount,) = registry.orderBounds(p.tokenIn);
         if (p.amountIn < minAmount) revert OrderTooSmall();
-        if (!registry.vaultAllowed(p.vault) || IERC4626(p.vault).asset() != p.tokenIn) revert VaultNotAllowed();
+        // The owner may pick any ERC-4626 vault of the order's token (the app scores and labels it);
+        // its risk is bounded to this order, approved for exactly `amountIn`. The agent only uses
+        // vaults the registry allows, so a leaked fast key can't park funds in a hostile vault.
+        if ((byAgent && !registry.vaultAllowed(p.vault)) || IERC4626(p.vault).asset() != p.tokenIn) revert VaultNotAllowed();
 
         IERC20(p.tokenIn).forceApprove(p.vault, p.amountIn);
         uint256 shares = IERC4626(p.vault).deposit(p.amountIn, address(this));
