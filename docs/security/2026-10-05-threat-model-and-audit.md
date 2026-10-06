@@ -215,6 +215,8 @@ Recommendation: (c) now; (a) as part of the v5/v6 redesign.
 | `reentrancy-*` on `_swap`, `_place`, `_create` | Mitigated: every external entry is `nonReentrant`; `_create` calls its own freshly cloned account. |
 | `incorrect-equality` (UTC day), `timestamp` | Intended: day buckets and deadlines. |
 | `unused-return` on `registry.fee()` | Intended: only the recipient is used. |
+| `unused-return` on `_redeem` (v5) | Intended: what a vault says it paid is ignored; the balance change is measured (N-1). |
+| `reentrancy-balance` on `_swap` (v5, re-run 2026-10-06) | Mitigated: `nonReentrant` on every entry; the before/after balances are the overspend and output checks. |
 | `missing-zero-check` | See L-2. |
 | `low-level-calls`, `assembly` | Intended: router call and revert bubbling. |
 
