@@ -94,7 +94,7 @@ export function createFiller({ pub, wallet, keeper, registry, wmon, usdc, secret
         const value = await pub.readContract({ address: o.account, abi: accountAbi, functionName: 'orderValue', args: [id] });
         const spend = value < p.amountIn ? value : p.amountIn;
         if (s.destChainId === 0) await fillLocal(o.account, id, p, s, spend, BigInt(feeBps));
-        // Cross fills trust the keeper with the Relay request (audit C-1): off until Across replaces it.
+        // Cross fills go through Across (v5): off until CROSS_FILLS=on.
         else if (crossFills) await fillCross(o.account, id, p, s, spend, BigInt(feeBps));
       } catch (e) {
         log(`order ${o.account}#${o.id}: ${e.shortMessage ?? e.message}`);

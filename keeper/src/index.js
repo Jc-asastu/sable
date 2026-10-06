@@ -47,7 +47,7 @@ for (const c of CHAINS) {
   const wallet = senderOf(signers.filler), relayWallet = senderOf(signers.relayer);
   const factory = getAddress(c.factory);
   const registry = await pub.readContract({ address: factory, abi: factoryAbi, functionName: 'registry' });
-  const ledger = createLedger({ pub, factory, usdc: c.usdc, stateFile: c.stateFile, startBlock: BigInt(c.start), secretsKey: env.SECRETS_KEY || null, log: tagged });
+  const ledger = createLedger({ pub, factory, registry, usdc: c.usdc, stateFile: c.stateFile, startBlock: BigInt(c.start), secretsKey: env.SECRETS_KEY || null, log: tagged });
   const filler = createFiller({ pub, wallet, keeper, registry, secretOf: ledger.secretOf, crossFills: env.CROSS_FILLS === 'on', minUsd: Number(env.MIN_ORDER_USD || 1), wmon: c.wrapped, usdc: c.usdc, chainId: c.id, kyberChain: c.kyber, log: tagged });
   // Sponsored opening waits for a deposit: 1 USDC, or the chain's native floor (audit H-2).
   const relay = createRelay({ pub, wallet: relayWallet, keeper: relayer, factory, deposits: [{ token: c.usdc, min: 1_000_000n }, { token: null, min: c.nativeFloor }],

@@ -72,6 +72,7 @@ Every order earns cSABLE: USDC, ETH, MON or a memecoin. Its weight is **its USD 
 **Why this resists manipulation:**
 - **Pumping a thin pool before placing doesn't pay.** The valuation is the *sale* quote of the full bag, which collapses on a thin pool.
 - **A pump has to last** across two quotes about 5 minutes apart.
+- **Only registry-allowed vaults earn weight.** An owner may park an order in any vault (v5), and a vault they control can hand the money straight back, so the same dollars could back many orders (audit N-2). Orders in other vaults keep weight 0.
 - **One token can't dominate:** weight per token is capped at a share of its pool liquidity (`maxWeightBps`, registry setting, 10% by default).
 
 **Trust:** the keeper already decides when to fill, inside the limit the contract enforces. Valuing is the same trust level, and its worst case is mis-weighting the reward pool. It can never touch an order's funds.

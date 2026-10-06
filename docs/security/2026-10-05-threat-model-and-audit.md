@@ -258,7 +258,7 @@ At the time of writing, the keeper reported **0 open orders** on Monad and Base,
 | **H-1** surplus capture on local fills | **Mitigated.** The monitor compares each fill with a fresh quote and revokes a keeper after 3 fills >2% short within an hour. A design fix (competitive fills) stays future work. | `monitor/src/rules.js` |
 | **H-2** relayer gas drain | **Fixed.** Agent place/cancel sign a capped `gasFee`; sponsored opening needs a deposit at the account address first. | `placeOrderWithSig`, `cancelOrderWithSig`; `keeper/src/relay.js` `funded()` |
 | **H-3** CDN and inline script risk | **Fixed (app, deploy pending).** viem, lightweight-charts and three.js are bundled same-origin; the build emits a CSP with hashed inline scripts, `frame-ancestors 'none'` and `nosniff`. Every page was checked under the policy with zero violations. | `vendor/`, `build.js headersFor` |
-| **H-4** one raw keeper key | **Pending** (Phase 2: role keys through Turnkey). | — |
+| **H-4** one raw keeper key | **Code ready, keys pending.** The keeper signs with one key per role (filler, relayer), through Turnkey when `TURNKEY_ORGANIZATION_ID` is set, with a per-role policy (allowed selectors, no value). Pending: Juan's Turnkey org, then `setKeeper(filler)`. | `keeper/src/signers.js`, `keeper/README.md` Keys |
 | **M-1** dust slows the filler | **Fixed.** Per-token `minAmount` on-chain; the keeper skips orders under `MIN_ORDER_USD` and serves big orders first. | `orderBounds`; `filler.tick` |
 | **M-2** plaintext hidden limits | **Fixed.** AES-256-GCM at rest with `SECRETS_KEY`, deleted when the order closes. | `keeper/src/ledger.js` |
 | **M-3** unbounded vault exposure | **Partly fixed.** The guardian can disallow a vault at once. Per-vault deposit caps would need cross-account accounting and are left for later. | `disallowVault` |
@@ -269,6 +269,10 @@ At the time of writing, the keeper reported **0 open orders** on Monad and Base,
 - A keeper can't push an Across deposit below the limit (`outputAmount ≥ destMinOut`).
 - An absurdly high `outputAmount` only delays the order: no relayer fills it, and Across refunds the account after `CROSS_FILL_WINDOW` (1h).
 - Guardian pauses never stop an owner from cancelling and withdrawing.
+- **Owner-chosen vaults** (any ERC-4626 of the order's token; the agent stays on registry vaults). Reviewed 2026-10-06; two findings, both fixed:
+  - **N-1 (Low): a vault could misreport what `redeem` paid.** The fill used the reported amount, so a hostile vault could make a fill spend the account's other idle funds (still into the owner's own trade, but past the order's own risk). Now `_redeem` measures the balance change. Test: `test_aVaultThatLiesAboutWhatItPaidCantSpendTheRestOfTheAccount`.
+  - **N-2 (Medium for rewards): points farming through an owner's own vault.** A vault the owner controls can hand the USDC straight back, so the same dollars sit in many "open" orders and inflate dollar-days. The ledger now counts only orders in registry-allowed vaults. cSABLE must apply the same rule to weights (D21).
+  - Not issues: approval is exact and reset to 0 after the deposit; the order is deleted before `redeem` and every entry point is `nonReentrant`; a vault that reverts only blocks its own order (the keeper handles orders one by one).
 - Slither on v5 shows only the same intended patterns as v4, plus intended zero-address uses in `setGuardian` and `setAcrossSpokePool` (zero disables).
 
 **Property tests:** `test/Orders.invariant.t.sol` runs 500 runs × 100 calls with an adversarial keeper. It picks the router mode (divert, underpay, overpull), outputs and gas, and sometimes tampers with the revealed secret or recipient. Invariants:

@@ -16,6 +16,7 @@ export const registryAbi = parseAbi([
   'function isKeeper(address) view returns (bool)',
   'function acrossSpokePool() view returns (address)',
   'function crossFillsPaused() view returns (bool)',
+  'function vaultAllowed(address) view returns (bool)',
 ]);
 
 const orderTuple = '((address tokenIn, address vault, uint64 deadline, uint128 amountIn, bytes32 commit) p, uint256 shares, bool byAgent)';

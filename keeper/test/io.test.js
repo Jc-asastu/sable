@@ -49,6 +49,31 @@ test('ledger discovers accounts and orders, and a fill earns D18 points', async 
   assert.equal(again.pointsOf(OWNER).points, 13_483);
 });
 
+test('an order in a vault the registry does not allow earns no points or multiplier', async () => {
+  const t0 = 1_800_000_000, OWN_VAULT = A(2);
+  const events = [
+    { block: 10n, address: FACTORY, eventName: 'AccountCreated', args: { owner: OWNER, account: ACCOUNT } },
+    { block: 20n, address: ACCOUNT, eventName: 'OrderPlaced', args: { id: 1n, tokenIn: USDC, vault: OWN_VAULT, amountIn: 1_000_000_000n, commit: pad('0x01') } },
+    { block: 30n, address: ACCOUNT, eventName: 'OrderPlaced', args: { id: 2n, tokenIn: USDC, vault: A(1), amountIn: 1_000_000_000n, commit: pad('0x02') } },
+    { block: 230n, address: ACCOUNT, eventName: 'OrderFilled', args: { id: 2n, spent: 1_000_000_000n, amountOut: 1n, yieldKept: 0n } },
+  ];
+  const time = { 20n: t0, 30n: t0 + 2 * DAY, 230n: t0 + 2 * DAY };
+  const pub = {
+    getBlockNumber: async () => 250n,
+    getBlock: async ({ blockNumber }) => ({ timestamp: BigInt(time[blockNumber] ?? t0) }),
+    getLogs: async ({ address, fromBlock, toBlock }) => events
+      .filter((e) => e.block >= fromBlock && e.block <= toBlock && (Array.isArray(address) ? address.map((x) => x.toLowerCase()).includes(e.address.toLowerCase()) : address === e.address))
+      .filter((e) => (address === FACTORY) === (e.eventName === 'AccountCreated'))
+      .map((e, i) => ({ ...e, blockNumber: e.block, logIndex: i })),
+    readContract: async ({ address, functionName, args }) => (assert.equal(address, REGISTRY), assert.equal(functionName, 'vaultAllowed'), args[0] === A(1)),
+  };
+  const stateFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'keeper-')), 'state.json');
+  const ledger = createLedger({ pub, factory: FACTORY, registry: REGISTRY, usdc: USDC, stateFile, startBlock: 1n, log() {} });
+  await ledger.sync();
+  // The fill earns its base 10,000; the 2 days the other $1,000 waited in its own vault add nothing.
+  assert.equal(ledger.pointsOf(OWNER).points, 10_000);
+});
+
 // ── filler ──
 
 // `order` is both halves in one object: the chain returns it as `p`, the secret store returns it as the secret.

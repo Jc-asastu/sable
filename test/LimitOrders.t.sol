@@ -38,6 +38,17 @@ contract MockSpokePool {
     }
 }
 
+/// A hostile vault an owner might be talked into: it pays back half and claims it paid everything.
+contract LyingVault is MockVault {
+    constructor(IERC20 asset_) MockVault(asset_) {}
+
+    function redeem(uint256 shares, address receiver, address owner_) public override returns (uint256 assets) {
+        assets = previewRedeem(shares);
+        _burn(owner_, shares);
+        IERC20(asset()).transfer(receiver, assets / 2);
+    }
+}
+
 /// Limit orders that earn yield while they wait (DECISIONS D17).
 contract LimitOrdersTest is AgentOrders {
     MockToken usdc;
@@ -189,6 +200,25 @@ contract LimitOrdersTest is AgentOrders {
         p = _public(100e6);
         p.vault = address(other);
         _expectAgentRevert(p, SableAccount.VaultNotAllowed.selector);
+    }
+
+    function test_aVaultThatLiesAboutWhatItPaidCantSpendTheRestOfTheAccount() public {
+        SableAccount.OrderParams memory p = _local(300e6, 1);
+        p.vault = address(new LyingVault(usdc));
+        uint256 id = _placeAsOwner(p);
+        assertEq(usdc.balanceOf(address(account)), 700e6, "700 USDC sit idle, outside the order");
+
+        vm.prank(keeper);
+        account.fillOrder(id, s, address(router), _route(150e6, 1), 0); // only 150 came back
+        assertEq(usdc.balanceOf(treasury), 150e6 * 30 / 10_000, "the fee is on what came back");
+        assertEq(usdc.balanceOf(address(account)), 700e6, "the idle USDC is untouched");
+
+        p = _local(300e6, 1);
+        p.vault = address(new LyingVault(usdc));
+        id = _placeAsOwner(p);
+        vm.prank(owner);
+        account.cancelOrder(id);
+        assertEq(usdc.balanceOf(address(account)), 550e6, "a cancel returns what really came back");
     }
 
     function test_rejectsWrongAssetAndBadShapes() public {

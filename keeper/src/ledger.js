@@ -2,7 +2,7 @@
 // State is a small JSON file so a restart resumes from its cursor instead of rescanning history.
 import fs from 'node:fs';
 import crypto from 'node:crypto';
-import { factoryAbi, accountAbi } from './chain.js';
+import { factoryAbi, accountAbi, registryAbi } from './chain.js';
 import { fillPoints, dollarDays, multiplier } from './points.js';
 
 const CHUNK = 100n; // Monad's eth_getLogs serves at most 100 blocks per call
@@ -12,7 +12,7 @@ const ADDRESSES_PER_CALL = 500;
  * `secretsKey`: 32-byte hex key (Railway variable SECRETS_KEY). Hidden limits are kept with AES-256-GCM
  * so a copy of the state file or its backup reveals nothing; without a key they are kept as before.
  */
-export function createLedger({ pub, factory, usdc, stateFile, startBlock, secretsKey = null, log = console.log }) {
+export function createLedger({ pub, factory, registry = null, usdc, stateFile, startBlock, secretsKey = null, log = console.log }) {
   const key = secretsKey ? Buffer.from(secretsKey, 'hex') : null;
   if (key && key.length !== 32) throw new Error('SECRETS_KEY must be 32 bytes of hex');
   const seal = (obj) => {
@@ -48,12 +48,22 @@ export function createLedger({ pub, factory, usdc, stateFile, startBlock, secret
   // Orders here are spent in USDC; anything else has no reliable USD value and earns no points.
   const usdOf = (token, units) => (token.toLowerCase() === usdc.toLowerCase() ? Number(units) / 1e6 : null);
 
+  // Only orders in vaults the registry allows earn points. An owner may pick any vault (v5), and one of
+  // their own could hand the USDC straight back, so the same dollars would sit in many "open" orders.
+  const allowed = new Set(); // only yes is cached: a vault can be allowed later
+  const counts = async (vault) => {
+    if (!registry || allowed.has(vault.toLowerCase())) return true;
+    const ok = await pub.readContract({ address: registry, abi: registryAbi, functionName: 'vaultAllowed', args: [vault] });
+    if (ok) allowed.add(vault.toLowerCase());
+    return ok;
+  };
+
   async function apply(account, l) {
     const owner = state.accounts[account];
     const key = `${account}:${l.args.id}`;
     const at = await timeOf(l.blockNumber);
     if (l.eventName === 'OrderPlaced') {
-      state.orders[key] = { account, owner, id: String(l.args.id), usd: usdOf(l.args.tokenIn, l.args.amountIn),
+      state.orders[key] = { account, owner, id: String(l.args.id), usd: (await counts(l.args.vault)) ? usdOf(l.args.tokenIn, l.args.amountIn) : null,
         tokenIn: l.args.tokenIn, commit: l.args.commit, openedAt: at, closedAt: null };
       return;
     }

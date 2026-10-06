@@ -505,7 +505,7 @@ contract SableAccount is Initializable, ReentrancyGuard, EIP712 {
         if (o.byAgent && !cross && capOf(s.tokenOut).daily == 0) revert TokenNotAllowed();
         if (block.timestamp > p.deadline) revert Expired();
         delete _orders[id];
-        uint256 assets = IERC4626(p.vault).redeem(o.shares, address(this), address(this));
+        uint256 assets = _redeem(o);
         spend = assets < p.amountIn ? assets : p.amountIn;
         kept = assets - spend;
     }
@@ -532,9 +532,18 @@ contract SableAccount is Initializable, ReentrancyGuard, EIP712 {
         LimitOrder memory o = _orders[id];
         if (o.p.amountIn == 0) revert NoOrder();
         delete _orders[id];
-        returned = IERC4626(o.p.vault).redeem(o.shares, address(this), address(this));
+        returned = _redeem(o);
         tokenIn = o.p.tokenIn;
         emit OrderCancelled(id, returned);
+    }
+
+    /// What the order's shares really paid back. The owner may pick any vault, and one could report more
+    /// than it sends; trusting its word would let a fill spend the account's other funds.
+    function _redeem(LimitOrder memory o) private returns (uint256) {
+        IERC20 token = IERC20(o.p.tokenIn);
+        uint256 before = token.balanceOf(address(this));
+        IERC4626(o.p.vault).redeem(o.shares, address(this), address(this));
+        return token.balanceOf(address(this)) - before;
     }
 
     function order(uint256 id) external view returns (LimitOrder memory) {
