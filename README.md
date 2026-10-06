@@ -101,3 +101,7 @@ Licensed under [BUSL-1.1](LICENSE): read it, audit it, learn from it. Commercial
 permission until October 6, 2028, when it becomes GPL.
 
 Built by Juan Cruz Maisú.
+
+---
+
+<sub>Note: the domains above are temporary, and Sable is currently in early production beta.</sub>
