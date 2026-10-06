@@ -3,12 +3,15 @@
   "private": true,
   "type": "module",
   "description": "Watches the keeper and the registry; alerts, and pauses or revokes through the guardian (audit section 3, item 4).",
-  "engines": { "node": ">=20" },
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "start": "node src/index.js",
     "test": "node --test \"test/*.test.js\""
   },
   "dependencies": {
     "viem": "2.21.0"
-  }
+  },
+  "license": "BUSL-1.1"
 }

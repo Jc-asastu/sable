@@ -1,10 +1,9 @@
 # Sable · Decisions
 
-> **Version note, 2026-09-29:** This is a chronological decision record, not one
-> simultaneous description of current behavior. D9/D11 agent restrictions and the
-> earlier spike exclusions are superseded in part by later decisions and local v3.
-> [Local verification](LOCAL-VERIFICATION.md) records current source behavior,
-> executable checks and known gaps without changing these historical decisions.
+This is the log of how Sable got here, in order. Later decisions refine earlier ones: the
+first spike was an on-chain order book (D1–D8), then trading accounts (D9–D15), then limit
+orders that earn (D17 onwards). Newer designs live in [specs](specs/): D19 vaults on any chain,
+D20 hidden orders, D21 sharing fees with the orders that wait.
 
 Each decision: what, why, and the tradeoff we accept.
 

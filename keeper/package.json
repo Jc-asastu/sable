@@ -15,5 +15,6 @@
     "@turnkey/http": "^6.6.0",
     "@turnkey/viem": "^0.14.44",
     "viem": "^2.57.3"
-  }
+  },
+  "license": "BUSL-1.1"
 }

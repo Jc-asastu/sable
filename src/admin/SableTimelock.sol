@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: UNLICENSED
+// SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.28;
 
 // The 24h timelock that owns the factory and the registry; its proposer and executor is the Safe (audit C-2).
