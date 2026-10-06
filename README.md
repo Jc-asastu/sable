@@ -57,6 +57,11 @@ product plus everything the audit asked for. It isn't deployed yet.
 | Oct 5 | We stop and audit ourselves. Full threat model: 2 critical and 4 high findings, caught before anyone lost a cent |
 | Oct 6 | v5: the critical findings fixed, the keeper tested as an attacker, the handover to a Safe tested end to end |
 
+It moved this fast because it didn't start from zero. I had the pieces scattered across earlier
+projects: an agent wallet whose spending limits live on-chain (Secret Agent Wallet), keepers and a
+full self-audit of a perp exchange on Solana (SUR), and a lot of time spent on how trading should
+feel. Sable is where all of that comes together in one product.
+
 The rule we work by: the keeper that fills orders decides **when**, never **where** the money goes.
 The contract checks the price, the recipient and every amount. A misbehaving keeper can delay an
 order. It can't take it or fill it at a worse price.
