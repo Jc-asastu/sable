@@ -33,6 +33,9 @@ const CHAINS = [
   // Robinhood Chain joins when ROBINHOOD_FACTORY is set. Its dollar is USDG (6 decimals, like USDC); stocks trade here.
   env.ROBINHOOD_FACTORY && { id: 4663, name: 'Robinhood', sym: 'ETH', kyber: 'robinhood', rpc: env.ROBINHOOD_RPC_URL || 'https://rpc.mainnet.chain.robinhood.com', factory: env.ROBINHOOD_FACTORY, start: need('ROBINHOOD_START_BLOCK'),
     stateFile: env.ROBINHOOD_STATE_FILE || 'state-robinhood.json', usdc: '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168', wrapped: '0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73' },
+  // Arbitrum joins when ARBITRUM_FACTORY is set.
+  env.ARBITRUM_FACTORY && { id: 42161, name: 'Arbitrum', sym: 'ETH', kyber: 'arbitrum', rpc: env.ARBITRUM_RPC_URL || 'https://arb1.arbitrum.io/rpc,https://arbitrum-one-rpc.publicnode.com', factory: env.ARBITRUM_FACTORY, start: need('ARBITRUM_START_BLOCK'),
+    stateFile: env.ARBITRUM_STATE_FILE || 'state-arbitrum.json', usdc: '0xaf88d065e77c8cC2239327C5EDb3A432268e5831', wrapped: '0x82aF49447D8a07e3bd95BD0d56f35241523fBab1' },
 ].filter(Boolean);
 
 const every = (ms, fn, tag) => { const run = async () => { try { await fn(); } catch (e) { log(`${tag} ${fn.name}: ${e.shortMessage ?? e.message}`); } setTimeout(run, ms); }; run(); };
