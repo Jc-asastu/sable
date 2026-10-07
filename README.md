@@ -80,9 +80,10 @@ order. It can't take it or fill it at a worse price.
 
 - **v5 on mainnet**, with the admin on a Safe.
 - **More networks, and orders that cross them**: buy on one chain, receive on another, through Across.
-- **Tokenized stocks.** xStocks went live natively on Monad on October 6 (NVDAx, TSLAx, SPYx and
-  more). "Buy NVIDIA if it drops to 220 and earn 6% while you wait" already works with these
-  contracts. We're waiting on liquidity.
+- **Tokenized stocks.** Robinhood Stock Tokens are the most liquid stocks on-chain (NVIDIA alone
+  trades over $100M a day on Robinhood Chain), and they're already listed in the app. Next is Sable
+  on Robinhood Chain, where a large Morpho USDG vault can hold an order like "buy NVIDIA if it drops
+  to 220" and earn while it waits.
 - **cSABLE**: part of every fee goes to the orders that are still waiting. The longer you wait,
   the more you earn.
 - **An external audit** before we invite real size.
