@@ -8,10 +8,11 @@ import {IERC4626} from "@openzeppelin/contracts/interfaces/IERC4626.sol";
 /// @notice Which vaults can hold a limit order: an order needs an ERC-4626 of USDC that takes a deposit and
 /// pays it back in the same transaction (the keeper redeems and swaps at once). For each candidate: deposit
 /// 1,000 USDC, redeem it all at once, and log what came back. Skipped without the RPC variables:
-/// MONAD_RPC_URL=… BASE_RPC_URL=… forge test --mc VaultCandidates -vv
+/// MONAD_RPC_URL=… BASE_RPC_URL=… ARBITRUM_RPC_URL=… forge test --mc VaultCandidates -vv
 contract VaultCandidatesTest is Test {
     address constant MONAD_USDC = 0x754704Bc059F8C67012fEd69BC8A327a5aafb603;
     address constant BASE_USDC = 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913;
+    address constant ARB_USDC = 0xaf88d065e77c8cC2239327C5EDb3A432268e5831;
 
     function _roundTrip(address vault, address usdc, string memory name) internal {
         address me = makeAddr(name);
@@ -58,5 +59,14 @@ contract VaultCandidatesTest is Test {
         _roundTrip(0xeE8F4eC5672F09119b96Ab6fB59C27E1b7e44b61, BASE_USDC, "Gauntlet USDC Prime");
         _roundTrip(0xef417a2512C5a41f69AE4e021648b69a7CdE5D03, BASE_USDC, "Yearn OG USDC");
         _roundTrip(0x7BfA7C4f149E7415b73bdeDfe609237e29CBF34A, BASE_USDC, "Spark USDC");
+    }
+
+    function test_arbitrum() public {
+        string memory rpc = vm.envOr("ARBITRUM_RPC_URL", string(""));
+        if (bytes(rpc).length == 0) vm.skip(true);
+        vm.createSelectFork(rpc);
+        _roundTrip(0x1A996cb54bb95462040408C06122D45D6Cdb6096, ARB_USDC, "Fluid fUSDC");
+        _roundTrip(0x7CFaDFD5645B50bE87d546f42699d863648251ad, ARB_USDC, "Aave stataUSDCn");
+        _roundTrip(0x5c0C306Aaa9F877de636f4d5822cA9F2E81563BA, ARB_USDC, "Steakhouse High Yield USDC");
     }
 }
