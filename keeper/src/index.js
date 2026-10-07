@@ -30,6 +30,9 @@ const CHAINS = [
     stateFile: env.STATE_FILE || 'state.json', usdc: '0x754704Bc059F8C67012fEd69BC8A327a5aafb603', wrapped: '0x3bd359C1119dA7Da1D913D1C4D2B7c461115433A' },
   env.BASE_FACTORY && { id: 8453, name: 'Base', sym: 'ETH', kyber: 'base', rpc: env.BASE_RPC_URL || 'https://developer-access-mainnet.base.org,https://base-rpc.publicnode.com,https://base.drpc.org,https://mainnet.base.org', factory: env.BASE_FACTORY, start: need('BASE_START_BLOCK'),
     stateFile: env.BASE_STATE_FILE || 'state-base.json', usdc: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913', wrapped: '0x4200000000000000000000000000000000000006' },
+  // Robinhood Chain joins when ROBINHOOD_FACTORY is set. Its dollar is USDG (6 decimals, like USDC); stocks trade here.
+  env.ROBINHOOD_FACTORY && { id: 4663, name: 'Robinhood', sym: 'ETH', kyber: 'robinhood', rpc: env.ROBINHOOD_RPC_URL || 'https://rpc.mainnet.chain.robinhood.com', factory: env.ROBINHOOD_FACTORY, start: need('ROBINHOOD_START_BLOCK'),
+    stateFile: env.ROBINHOOD_STATE_FILE || 'state-robinhood.json', usdc: '0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168', wrapped: '0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73' },
 ].filter(Boolean);
 
 const every = (ms, fn, tag) => { const run = async () => { try { await fn(); } catch (e) { log(`${tag} ${fn.name}: ${e.shortMessage ?? e.message}`); } setTimeout(run, ms); }; run(); };

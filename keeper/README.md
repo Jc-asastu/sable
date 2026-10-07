@@ -34,6 +34,8 @@ send. Then `KEEPER_ADDRESS` must be a registered keeper so simulations pass.
 | `KEEPER_PRIVATE_KEY` | to send | watch-only without it |
 | `KEEPER_ADDRESS` | watch-only | — |
 | `RPC_URL` | no | `https://rpc.monad.xyz` |
+| `BASE_FACTORY`, `BASE_START_BLOCK` | to serve Base | off without them |
+| `ROBINHOOD_FACTORY`, `ROBINHOOD_START_BLOCK` | to serve Robinhood Chain | off without them; orders there wait in USDG |
 | `STATE_FILE` | no | `state.json` (put it on a Railway volume) |
 | `PORT` | no | `8080` |
 | `ALLOWED_ORIGIN` | no | `https://sabledex.vercel.app` |
