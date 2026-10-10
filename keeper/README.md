@@ -70,7 +70,7 @@ policies limit what it may sign. Set `TURNKEY_ORGANIZATION_ID`, `TURNKEY_API_PUB
 2. Railway → New project → Deploy from this repo, root `keeper/`, start command `npm start`.
 3. Variables: `FACTORY`, `START_BLOCK`, the keys (see Keys; paste them only here, never in a file or chat),
    `STATE_FILE=/data/state.json`. Add a volume mounted at `/data`.
-4. From the admin wallet: `registry.setKeeper(<keeper address>, true)`, `registry.setRelayDepository(0x4cd00e387622c35bddb9b4c962c136462338bc31)`,
+4. From the admin wallet: `registry.setKeeper(<keeper address>, true)`, `registry.setAcrossSpokePool(0x4cd00e387622c35bddb9b4c962c136462338bc31)`,
    `registry.setVault(...)` for each vault users may choose.
 5. Check `https://<railway-url>/health`.
 

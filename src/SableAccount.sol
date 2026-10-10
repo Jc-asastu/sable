@@ -519,11 +519,14 @@ contract SableAccount is Initializable, ReentrancyGuard, EIP712 {
     }
 
     /// @notice A cancel the agent signed; `gasFee` (in `tokenIn`, out of what comes back) repays the relayer.
+    /// Only for orders the agent placed: those passed the agent caps, so the fee it can skim is bounded too.
+    /// An owner-placed order has no size cap and only the owner (or an expired-order keeper) may cancel it.
     function cancelOrderWithSig(uint256 id, uint256 gasFee, uint256 nonce, uint256 deadline, uint64 epoch, bytes calldata sig)
         external
         nonReentrant
     {
         _useAgentSig(keccak256(abi.encode(CANCEL_TYPEHASH, id, gasFee, nonce, deadline, epoch)), nonce, deadline, epoch, sig);
+        if (!_orders[id].byAgent) revert NotAuthorized();
         (address tokenIn, uint256 returned) = _cancel(id);
         if (gasFee != 0) _payGas(tokenIn, gasFee, returned);
     }

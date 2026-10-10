@@ -11,6 +11,7 @@ const env = process.env;
 const need = (k) => { if (!env[k]) throw new Error(`${k} is required`); return env[k]; };
 const log = (m) => console.log(new Date().toISOString(), m);
 const CHUNK = 100n; // Monad's eth_getLogs serves at most 100 blocks per call
+const ADDRESSES_PER_CALL = 500; // and rejects address filters much longer than this
 
 const CHAINS = [
   { id: 143, name: 'Monad', sym: 'MON', kyber: 'monad', rpc: env.RPC_URL || 'https://rpc.monad.xyz', factory: need('FACTORY'), start: need('START_BLOCK'), stateFile: env.STATE_FILE || 'monitor.json', floor: 2n * 10n ** 18n },
@@ -39,6 +40,7 @@ const registryAbi = parseAbi([
 const accountAbi = parseAbi([
   'event OrderFilled(uint256 indexed id, uint256 spent, uint256 amountOut, uint256 yieldKept)',
   'event Swapped(address indexed by, address indexed tokenIn, address indexed tokenOut, uint256 amountIn, uint256 amountOut)',
+  'event GasPaid(address indexed token, address indexed to, uint256 amount)',
 ]);
 
 async function alert({ level, text }) {
@@ -74,8 +76,12 @@ for (const c of CHAINS) {
       const request = a.kind === 'revokeKeeper'
         ? { address: registry, abi: registryAbi, functionName: 'revokeKeeper', args: [a.keeper] }
         : { address: registry, abi: registryAbi, functionName: 'setPaused', args: [await pub.readContract({ address: registry, abi: registryAbi, functionName: 'newOrdersPaused' }), true] };
-      const hash = await wallet.writeContract(request);
-      await say({ level: 'critical', text: `guardian ${a.kind} sent: ${hash}` });
+      try {
+        const hash = await wallet.writeContract(request);
+        await say({ level: 'critical', text: `guardian ${a.kind} sent: ${hash}` });
+      } catch (e) {
+        await say({ level: 'critical', text: `guardian ${a.kind} FAILED: ${e.shortMessage ?? e.message}` });
+      }
     }
   }
 
@@ -85,26 +91,43 @@ for (const c of CHAINS) {
     return r.ok ? BigInt((await r.json()).data?.routeSummary?.amountOut ?? 0) : 0n;
   }
 
+  /**
+   * What a local fill really got against the market. `Swapped.amountOut` is net of the relayer's gas fee
+   * and the router only saw `amountIn` minus the protocol fee, so add the fee back and quote the net
+   * input, or honest fills look short and strike the keeper.
+   */
+  async function judge(swap, gasLogs, feeBps) {
+    const tx = await pub.getTransaction({ hash: swap.transactionHash });
+    const gas = gasLogs.filter((g) => g.args.token.toLowerCase() === swap.args.tokenOut.toLowerCase()).reduce((s, g) => s + g.args.amount, 0n);
+    const netIn = swap.args.amountIn * BigInt(10_000 - feeBps) / 10_000n;
+    const quoteOut = await quote(swap.args.tokenIn, swap.args.tokenOut, netIn).catch(() => 0n);
+    return { keeper: tx.from, amountOut: swap.args.amountOut + gas, quoteOut, tx: swap.transactionHash };
+  }
+
   async function pass() {
     const head = await pub.getBlockNumber();
+    const [feeBps] = await pub.readContract({ address: registry, abi: registryAbi, functionName: 'fee' });
     for (let from = BigInt(state.cursor) + 1n; from <= head; from += CHUNK) {
       const to = from + CHUNK - 1n > head ? head : from + CHUNK - 1n;
       for (const l of await pub.getLogs({ address: factory, event: factoryAbi[0], fromBlock: from, toBlock: to })) state.accounts.push(l.args.account);
       for (const l of await pub.getLogs({ address: registry, events: registryAbi.filter((x) => x.type === 'event'), fromBlock: from, toBlock: to })) await act(onRegistryEvent(l));
-      if (state.accounts.length) {
-        const logs = await pub.getLogs({ address: state.accounts, events: accountAbi, fromBlock: from, toBlock: to });
-        const swaps = new Map(logs.filter((l) => l.eventName === 'Swapped').map((l) => [l.transactionHash, l]));
+      const fills = []; // one entry per OrderFilled; a local fill carries its judgement, a cross fill is null
+      for (let i = 0; i < state.accounts.length; i += ADDRESSES_PER_CALL) {
+        const logs = await pub.getLogs({ address: state.accounts.slice(i, i + ADDRESSES_PER_CALL), events: accountAbi, fromBlock: from, toBlock: to });
+        const byTx = (name) => logs.filter((l) => l.eventName === name).reduce((m, l) => m.set(l.transactionHash, [...(m.get(l.transactionHash) ?? []), l]), new Map());
+        const swaps = byTx('Swapped'), gasPaid = byTx('GasPaid');
         for (const l of logs.filter((x) => x.eventName === 'OrderFilled')) {
-          fillTimes.push(Date.now());
-          const swap = swaps.get(l.transactionHash); // a local fill swaps in the same transaction; a cross fill doesn't
-          if (!swap) continue;
-          const tx = await pub.getTransaction({ hash: l.transactionHash });
-          const quoteOut = await quote(swap.args.tokenIn, swap.args.tokenOut, swap.args.amountIn).catch(() => 0n);
-          await act(onLocalFill({ keeper: tx.from, amountOut: swap.args.amountOut, quoteOut, at: Math.floor(Date.now() / 1000), tx: l.transactionHash }, strikes));
+          const swap = swaps.get(l.transactionHash)?.[0]; // a local fill swaps in the same transaction; a cross fill doesn't
+          fills.push(swap ? await judge(swap, gasPaid.get(l.transactionHash) ?? [], feeBps) : null);
         }
       }
+      // The cursor moves before anything is counted: a failure above retries the range, a retry never double-counts.
       state.cursor = String(to);
       save();
+      for (const f of fills) {
+        fillTimes.push(Date.now());
+        if (f) await act(onLocalFill({ ...f, at: Math.floor(Date.now() / 1000) }, strikes));
+      }
     }
     while (fillTimes.length && Date.now() - fillTimes[0] > 60_000) fillTimes.shift();
     await act(onFillRate(fillTimes.length, await pub.readContract({ address: registry, abi: registryAbi, functionName: 'crossFillsPaused' })));

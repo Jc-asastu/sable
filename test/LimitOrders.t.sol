@@ -356,6 +356,18 @@ contract LimitOrdersTest is AgentOrders {
         assertEq(usdc.balanceOf(address(account)), 1_000e6);
     }
 
+    function test_agentCannotCancelAnOwnerPlacedOrder() public {
+        uint256 id = _placeAsOwner(_local(300e6, 1_000e18)); // owner orders have no size cap
+        uint256 n = ++nonce;
+        uint256 dl = block.timestamp + 1 hours;
+        uint64 epoch = account.agentEpoch();
+        bytes memory sig = _signOrder(address(account), agentKey, keccak256(abi.encode(CANCEL_TYPEHASH, id, uint256(1e6), n, dl, epoch)));
+        vm.prank(stranger);
+        vm.expectRevert(SableAccount.NotAuthorized.selector);
+        account.cancelOrderWithSig(id, 1e6, n, dl, epoch, sig);
+        assertEq(account.orderValue(id), 300e6, "the order is untouched");
+    }
+
     function test_agentOrdersRespectCapsAndTheShield() public {
         _expectAgentRevert(_local(501e6, 1), SableAccount.ExceedsPerTrade.selector);
 
