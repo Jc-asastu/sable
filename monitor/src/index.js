@@ -6,6 +6,7 @@ import fs from 'node:fs';
 import { createPublicClient, createWalletClient, http, fallback, parseAbi, defineChain, getAddress } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { onRegistryEvent, onLocalFill, onFillRate, onBalance } from './rules.js';
+import { sendAlert } from './alert.js';
 
 const env = process.env;
 const need = (k) => { if (!env[k]) throw new Error(`${k} is required`); return env[k]; };
@@ -43,12 +44,7 @@ const accountAbi = parseAbi([
   'event GasPaid(address indexed token, address indexed to, uint256 amount)',
 ]);
 
-async function alert({ level, text }) {
-  log(`${level.toUpperCase()} ${text}`);
-  if (!env.ALERT_WEBHOOK) return;
-  await fetch(env.ALERT_WEBHOOK, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text: `[sable ${level}] ${text}` }) })
-    .catch((e) => log(`alert webhook failed: ${e.message}`));
-}
+const alert = (notification) => sendAlert(notification, { webhook: env.ALERT_WEBHOOK, log });
 
 const guardianKey = env.GUARDIAN_PRIVATE_KEY?.trim();
 const guardian = guardianKey ? privateKeyToAccount(guardianKey.startsWith('0x') ? guardianKey : `0x${guardianKey}`) : null;
