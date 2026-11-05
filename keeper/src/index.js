@@ -14,6 +14,7 @@ import { createFiller } from './filler.js';
 import { createRelay } from './relay.js';
 import { createSender } from './sender.js';
 import { ROLES, signerFor } from './signers.js';
+import { createTickQueue } from './tick-queue.js';
 
 const env = process.env;
 const need = (name) => { if (!env[name]) throw new Error(`${name} is required`); return env[name]; };
@@ -56,8 +57,7 @@ for (const c of CHAINS) {
   tagged(`filler ${wallet ? keeper : `${keeper} (watch-only)`} · relayer ${relayWallet ? relayer : 'none'} · factory ${factory} · registry ${registry}`);
 
   // One key, one nonce sequence per chain: every pass over orders waits for the previous one.
-  let queue = Promise.resolve();
-  const tick = (orders) => (queue = queue.then(() => filler.tick(orders)));
+  const tick = createTickQueue((orders) => filler.tick(orders));
   // A new order gets its first look right after the sync that saw it, not on the next 5s pass.
   const seen = new Set();
   every(2_000, async function sync() {
