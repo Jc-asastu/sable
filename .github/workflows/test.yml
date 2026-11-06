@@ -44,3 +44,33 @@ jobs:
         with:
           name: gas-report
           path: gas-report.txt
+
+  node:
+    name: Node
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          package-manager-cache: false
+
+      - name: Install keeper dependencies
+        run: npm ci --prefix keeper --ignore-scripts
+
+      - name: Test keeper
+        run: npm test --prefix keeper
+
+      - name: Install monitor dependencies
+        run: npm ci --prefix monitor --ignore-scripts
+
+      - name: Test monitor
+        run: npm test --prefix monitor
+
+      - name: Test fixture CLI
+        run: node --test scripts/kyber-fixture.test.mjs
