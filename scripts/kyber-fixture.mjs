@@ -2,6 +2,7 @@
 //   node scripts/kyber-fixture.mjs <account> [amountIn=1000000]                 Monad USDC -> WMON (KyberFork)
 //   node scripts/kyber-fixture.mjs <account> <amountIn> <chain> <tokenIn> <tokenOut> <file>
 import { writeFileSync, mkdirSync } from "node:fs";
+import { dirname } from "node:path";
 
 const SLIPPAGE_BPS = 100;
 const [account, amountIn = "1000000", chain = "monad",
@@ -37,6 +38,6 @@ const fixture = {
   minOut: (amountOut * BigInt(10_000 - SLIPPAGE_BPS) / 10_000n).toString(),
   data: build.data.data,
 };
-mkdirSync("test/fixtures", { recursive: true });
+mkdirSync(dirname(file), { recursive: true });
 writeFileSync(file, JSON.stringify(fixture, null, 2));
 console.log(`saved route on ${chain}: ${amountIn} units -> ~${amountOut} units via ${fixture.router} into ${file}`);
