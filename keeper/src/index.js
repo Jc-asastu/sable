@@ -134,6 +134,7 @@ http.createServer(async (req, res) => {
     for await (const chunk of req) { body += chunk; if (body.length > 40_000) return reply(res, 413, { error: 'too large' }); }
     let input;
     try { input = JSON.parse(body); } catch { return reply(res, 400, { error: 'json body required' }); }
+    if (input === null || typeof input !== 'object' || Array.isArray(input)) return reply(res, 400, { error: 'json object required' });
     const net = netOf(input);
     if (!net) return reply(res, 400, { error: 'unsupported chain' });
     if (url.pathname === '/secret') {
