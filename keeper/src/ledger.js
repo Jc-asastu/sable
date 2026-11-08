@@ -31,7 +31,16 @@ export function createLedger({ pub, factory, registry = null, usdc, stateFile, s
   // secrets: the hidden half of each order by its commitment (D20). Only the keeper and the owner know them.
   const fresh = { cursor: String(startBlock - 1n), accounts: {}, orders: {}, points: {}, secrets: {} };
   let state = fresh;
-  try { state = { ...fresh, ...JSON.parse(fs.readFileSync(stateFile, 'utf8')) }; } catch { /* first run */ }
+  let saved;
+  try {
+    saved = fs.readFileSync(stateFile, 'utf8');
+  } catch (error) {
+    if (error?.code !== 'ENOENT') throw new Error(`Cannot read keeper state (${error?.code ?? 'unknown error'})`);
+  }
+  if (saved !== undefined) {
+    try { state = { ...fresh, ...JSON.parse(saved) }; }
+    catch { throw new Error('Invalid keeper state JSON'); }
+  }
 
   const save = () => {
     const tmp = `${stateFile}.tmp`;
