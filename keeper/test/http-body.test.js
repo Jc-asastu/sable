@@ -23,7 +23,7 @@ const multicallResult = encodeAbiParameters([
 const listen = (server) => new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
 const close = (server) => new Promise((resolve) => server.close(resolve));
 
-test('POST routes reject non-object JSON without dispatching it', async (t) => {
+test('POST routes reject malformed body and field types without stopping the server', async (t) => {
   const rpc = http.createServer(async (req, res) => {
     const chunks = [];
     for await (const chunk of req) chunks.push(chunk);
@@ -93,5 +93,28 @@ test('POST routes reject non-object JSON without dispatching it', async (t) => {
     assert.deepEqual(await post(route, '{'), { status: 400, body: { error: 'json body required' } });
     assert.deepEqual(await post(route, '{}'), { status: 400, body: { error: objectErrors[route] } });
     assert.deepEqual(await post(route, '{"chainId":999}'), { status: 400, body: { error: 'unsupported chain' } });
+    for (const chainId of [null, 143, '143']) {
+      assert.deepEqual(await post(route, JSON.stringify({ chainId })), { status: 400, body: { error: objectErrors[route] } });
+    }
+    for (const chainId of [[], true, { toString: null }]) {
+      assert.deepEqual(await post(route, JSON.stringify({ chainId })), { status: 400, body: { error: 'unsupported chain' } });
+    }
   }
+
+  assert.deepEqual(await post('/relay', JSON.stringify({ account: { toString: null }, data: '0x' })),
+    { status: 400, body: { error: objectErrors['/relay'] } });
+
+  const open = { owner: FACTORY, agent: REGISTRY, routers: [KEEPER], sig: '0x' };
+  for (const invalid of [
+    { owner: { toString: null } },
+    { agent: { toString: null } },
+    { routers: [{ toString: null }] },
+  ]) {
+    assert.deepEqual(await post('/open', JSON.stringify({ ...open, ...invalid })),
+      { status: 400, body: { error: objectErrors['/open'] } });
+  }
+
+  const health = await fetch(`http://127.0.0.1:${port}/health`);
+  assert.equal(health.status, 200);
+  assert.equal((await health.json()).ok, true);
 });

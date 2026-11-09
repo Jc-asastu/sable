@@ -104,7 +104,10 @@ const reply = (res, status, body) => {
   res.writeHead(status, { 'content-type': 'application/json', 'access-control-allow-headers': 'content-type', vary: 'origin' });
   res.end(JSON.stringify(body));
 };
-const netOf = (input) => nets.get(Number(input?.chainId ?? 143));
+const netOf = (input) => {
+  const chainId = input?.chainId ?? 143;
+  return typeof chainId === 'number' || typeof chainId === 'string' ? nets.get(Number(chainId)) : undefined;
+};
 http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://keeper');
   res.setHeader('access-control-allow-origin', ORIGINS.includes(req.headers.origin) ? req.headers.origin : ORIGINS[0]);

@@ -47,7 +47,7 @@ export function createRelay({ pub, wallet, keeper, factory, deposits = [], minPl
    * checks the signature, so a bad one only costs a failed estimate here.
    */
   async function open({ owner, agent, routers, cooldown, deadline, sig }, ip) {
-    if (!isAddress(owner) || !isAddress(agent) || !Array.isArray(routers) || routers.length > 8 || !routers.every(isAddress) || !isHex(sig)) return { status: 400, error: 'owner, agent, routers and sig required' };
+    if (typeof owner !== 'string' || !isAddress(owner) || typeof agent !== 'string' || !isAddress(agent) || !Array.isArray(routers) || routers.length > 8 || !routers.every((router) => typeof router === 'string' && isAddress(router)) || !isHex(sig)) return { status: 400, error: 'owner, agent, routers and sig required' };
     if (!allow(`ip:${ip}`, LIMIT.perIp) || !allow(`open:${owner.toLowerCase()}`, 5)) return { status: 429, error: 'slow down' };
     if (!wallet) return { status: 503, error: 'relayer is in watch-only mode' };
     try {
@@ -75,7 +75,7 @@ export function createRelay({ pub, wallet, keeper, factory, deposits = [], minPl
 
   /** { account, data } → { hash } or { error, status }. */
   async function relay({ account, data }, ip) {
-    if (!isAddress(account) || !isHex(data) || data.length > 2 + MAX_DATA * 2) return { status: 400, error: 'account and calldata required' };
+    if (typeof account !== 'string' || !isAddress(account) || !isHex(data) || data.length > 2 + MAX_DATA * 2) return { status: 400, error: 'account and calldata required' };
     let fn, args;
     try { ({ functionName: fn, args } = decodeFunctionData({ abi: relayable, data })); } catch { return { status: 400, error: 'not a relayable call' }; }
     // Placing and cancelling pay their own relay (audit H-2): at least `minPlaceFee` in the order's token.
